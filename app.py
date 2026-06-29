@@ -634,48 +634,59 @@ if nav=="📊 New Campaign Plan":
                 render_message(msg["role"],msg["content"])
         st.markdown('</div></div>',unsafe_allow_html=True)
 
-        # Check if brief is complete
+        # Clean [BRIEF_COMPLETE] tag from display
         last_agent_msg=next((m["content"] for m in reversed(st.session_state["chat_messages"]) if m["role"]=="agent"),"")
-        brief_complete="[BRIEF_COMPLETE]" in last_agent_msg
+        brief_auto_complete="[BRIEF_COMPLETE]" in last_agent_msg
+        if brief_auto_complete:
+            for m in st.session_state["chat_messages"]:
+                if m["role"]=="agent":
+                    m["content"]=m["content"].replace("[BRIEF_COMPLETE]","").strip()
 
-        if brief_complete:
-            clean_last=last_agent_msg.replace("[BRIEF_COMPLETE]","").strip()
-            if st.session_state["chat_messages"] and st.session_state["chat_messages"][-1]["content"]!=clean_last:
-                st.session_state["chat_messages"][-1]["content"]=clean_last
+        # Always show input box unless generating
+        has_messages=len([m for m in st.session_state["chat_messages"] if m["role"]=="user"]) >= 1
 
-            st.success("✅ Brief complete! Ready to generate your media plan.")
+        with st.form("chat_form",clear_on_submit=True):
+            col_inp,col_btn=st.columns([5,1])
+            user_input=col_inp.text_input("Your message",placeholder="Type your answer here…",label_visibility="collapsed")
+            submitted=col_btn.form_submit_button("Send →")
+
+        if submitted and user_input.strip():
+            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
+            with st.spinner("Orchy is thinking…"):
+                agent_reply=get_agent_response(
+                    st.session_state["chat_messages"],
+                    client_name, brand_name, data_summary
+                )
+            st.session_state["chat_messages"].append({"role":"agent","content":agent_reply})
+            st.rerun()
+
+        # Generate button — show once there are at least 3 user messages
+        num_user_msgs=len([m for m in st.session_state["chat_messages"] if m["role"]=="user"])
+        if num_user_msgs >= 3:
+            st.markdown("---")
+            if brief_auto_complete:
+                st.success("✅ Orchy has collected everything needed. Ready to generate!")
+            else:
+                st.info("💡 You can generate the plan at any point, or keep chatting to add more detail.")
             st.markdown('<div class="green-btn">',unsafe_allow_html=True)
             if st.button("🚀 Generate Media Plan",use_container_width=True):
                 with st.spinner("🤖 Analysing historical data and building your media plan…"):
-                    plan_text=generate_media_plan(
-                        st.session_state["chat_messages"],
-                        client_name, brand_name, data_summary
-                    )
-                    brief_summary=extract_brief_from_conversation(
-                        st.session_state["chat_messages"],
-                        client_name, brand_name, data_summary
-                    )
-                    st.session_state["generated_plan"]=plan_text
-                    st.session_state["brief_summary"]=brief_summary
-                    st.session_state["step"]=4
-                    st.rerun()
+                    try:
+                        plan_text=generate_media_plan(
+                            st.session_state["chat_messages"],
+                            client_name, brand_name, data_summary
+                        )
+                        brief_summary=extract_brief_from_conversation(
+                            st.session_state["chat_messages"],
+                            client_name, brand_name, data_summary
+                        )
+                        st.session_state["generated_plan"]=plan_text
+                        st.session_state["brief_summary"]=brief_summary
+                        st.session_state["step"]=4
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error generating plan: {e}")
             st.markdown('</div>',unsafe_allow_html=True)
-        else:
-            # Input box
-            with st.form("chat_form",clear_on_submit=True):
-                col_inp,col_btn=st.columns([5,1])
-                user_input=col_inp.text_input("Your message",placeholder="Type your answer here…",label_visibility="collapsed")
-                submitted=col_btn.form_submit_button("Send →")
-
-            if submitted and user_input.strip():
-                st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
-                with st.spinner("Orchy is thinking…"):
-                    agent_reply=get_agent_response(
-                        st.session_state["chat_messages"],
-                        client_name, brand_name, data_summary
-                    )
-                st.session_state["chat_messages"].append({"role":"agent","content":agent_reply})
-                st.rerun()
 
         st.markdown("---")
         if st.button("← Back to Data"):
