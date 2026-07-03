@@ -248,10 +248,11 @@ Generate a complete media plan with these sections:
    - Flight dates
 
 3. CHANNEL-BY-CHANNEL TACTICS
-   For each channel include:
-   - Recommended buying rate type (CPM / CPC / CPV / CPA / CPL)
-   - TARGET BUYING RATE in LKR — calculated from historical data benchmarks (give a specific range e.g. "CPM: LKR 380–450")
-   - Primary KPI with target value based on historical performance (e.g. "Target CTR: 1.2–1.8% based on past campaigns")
+   For each channel include — always lead with these three lines in this exact format:
+   • BUYING RATE TYPE: [CPM / CPC / CPV / CPA / CPL]
+   • TARGET BUYING RATE: LKR [range] — e.g. "LKR 380–450 CPM" (calculated from historical data)
+   • PRIMARY KPI TARGET: [metric]: [target range] — e.g. "CTR: 1.2–1.8%" (based on historical benchmarks)
+   Then continue with:
    - Secondary KPI targets with benchmark ranges
    - Ad formats and placements
    - Creative assets mapped to each placement (Static / Video / Carousel / Stories / UGC / Influencer)
@@ -362,6 +363,7 @@ def build_excel(brief_summary, plan_text, client_name, brand_name):
     usd_rate=320; commission=0.10; ssc_rate=0.025641; vat_rate=0.18; wht_rate=0.163
     current_row = hdr_row+1
     channel_totals = {}
+    channel_kpis = info.get("channel_kpis", {})
 
     for ch in channels:
         colour = next((v for k,v in channel_colours.items() if k.lower() in ch.lower()), navy)
@@ -373,7 +375,21 @@ def build_excel(brief_summary, plan_text, client_name, brand_name):
         billable= round(sub_lkr*1.05,0)
         row_bg = light if current_row%2==0 else white
         ws.row_dimensions[current_row].height=20
-        data=[ch, info.get("objective",""), info.get("audience",""), "CPM","","",sub_usd,sub_lkr,billable,info.get("assets",""),start_str,end_str,days]
+
+        # Get per-channel KPI data — match by channel name loosely
+        ch_kpi = {}
+        for k, v in channel_kpis.items():
+            if any(word.lower() in ch.lower() or ch.lower() in k.lower()
+                   for word in k.split()):
+                ch_kpi = v
+                break
+
+        kpi_type    = ch_kpi.get("kpi_type", "CPM")
+        buying_rate = ch_kpi.get("buying_rate", "—")
+        primary_kpi = ch_kpi.get("primary_kpi", "—")
+        ch_objective= ch_kpi.get("objective", info.get("objective",""))
+
+        data=[ch, ch_objective, info.get("audience",""), kpi_type, buying_rate, primary_kpi, sub_usd, sub_lkr, billable, info.get("assets",""), start_str, end_str, days]
         for ci,val in enumerate(data,1):
             fmt='#,##0.00' if ci==7 else ('#,##0' if ci in (8,9) else None)
             cs(current_row,ci,val,bg=row_bg,align="center" if ci>5 else "left",num_fmt=fmt)
@@ -418,9 +434,21 @@ def build_excel(brief_summary, plan_text, client_name, brand_name):
 def extract_brief_from_conversation(conversation, client_name, brand_name, data_summary):
     client = get_anthropic_client()
     conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in conversation])
-    prompt = f"""Extract the campaign brief details from this conversation and return ONLY a JSON object with these fields:
-campaign_name, objective, total_budget (number in LKR), start_date (YYYY-MM-DD), end_date (YYYY-MM-DD),
-audience, channels (array of strings), assets (string summary of creative assets), market.
+    prompt = f"""Extract the campaign brief details from this conversation and return ONLY a JSON object with these exact fields:
+- campaign_name (string)
+- objective (string)
+- total_budget (number in LKR, no commas)
+- start_date (YYYY-MM-DD)
+- end_date (YYYY-MM-DD)
+- audience (string)
+- channels (array of channel name strings)
+- assets (string summary of creative assets)
+- market (string)
+- channel_kpis: an object where each key is a channel name and value is an object with:
+    - kpi_type: the buying rate type e.g. "CPM", "CPC", "CPV", "CPA"
+    - buying_rate: target buying rate in LKR e.g. "LKR 450–520"
+    - primary_kpi: primary KPI name and target e.g. "CTR: 1.2–1.8%"
+    - objective: channel-level objective e.g. "Awareness", "Traffic", "Conversions"
 
 CONVERSATION:
 {conv_text}
@@ -428,7 +456,7 @@ CONVERSATION:
 Return only valid JSON, no other text."""
     msg = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=500,
+        max_tokens=1000,
         messages=[{"role":"user","content":prompt}]
     )
     try:
@@ -438,7 +466,8 @@ Return only valid JSON, no other text."""
     except:
         return {"campaign_name": "Campaign", "objective": "", "total_budget": 0,
                 "start_date": str(date.today()), "end_date": str(date.today()),
-                "audience": "", "channels": [], "assets": "", "market": "Sri Lanka"}
+                "audience": "", "channels": [], "assets": "", "market": "Sri Lanka",
+                "channel_kpis": {}}
 
 # ── Session defaults ──────────────────────────────────────────────────────────
 for key,default in [("step",1),("brief",{}),("selected_client",None),
