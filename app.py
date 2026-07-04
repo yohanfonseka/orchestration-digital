@@ -868,53 +868,6 @@ if nav=="📊  New Campaign Plan":
                 new_combined=pd.concat([d for _,d in new_dfs],ignore_index=True)
                 existing=st.session_state.get("combined_df")
                 st.session_state["combined_df"]=pd.concat([existing,new_combined],ignore_index=True) if existing is not None else new_combined
-        # ── Benchmark table from uploaded data ───────────────────────────────
-        if st.session_state.get("combined_df") is not None:
-            df_loaded = st.session_state["combined_df"]
-            benchmarks_loaded = extract_channel_benchmarks(df_loaded)
-
-            st.markdown('<div class="section-header">📊 Performance Benchmarks from Your Data</div>', unsafe_allow_html=True)
-            st.caption("These averages are extracted from your uploaded historical data and will be used in the planning session to set buying rates and KPI targets.")
-
-            # Build objective-based cost table
-            obj_kpi_map = {
-                "Awareness / Reach": "cpm",
-                "Video Views":       "cpv",
-                "Traffic":           "cpc",
-                "Leads":             "cpa",
-                "Conversions":       "cpa",
-            }
-            bench_rows = []
-            for ch, bench in benchmarks_loaded.items():
-                if not bench or bench.get("rows",0)==0: continue
-                is_global = bench.get("is_global_fallback", False)
-                source_note = "⚠️ Industry Avg" if is_global else f"✅ Your Data ({bench.get('rows',0)} rows)"
-                row = {"Channel": ch, "Data Source": source_note}
-                for obj_label, metric in obj_kpi_map.items():
-                    val = bench.get(metric)
-                    if val:
-                        row[obj_label] = f"LKR {val:,.0f}" if metric != "cpm" or val >= 1 else f"LKR {val:.2f}"
-                    else:
-                        ia = INDUSTRY_AVERAGES.get(ch, {})
-                        ia_val = ia.get(metric)
-                        row[obj_label] = f"LKR {ia_val:,.0f} ⚠️" if ia_val else "—"
-                if "CTR %" not in row:
-                    ctr = bench.get("ctr") or INDUSTRY_AVERAGES.get(ch,{}).get("ctr")
-                    row["CTR %"] = f"{ctr:.2f}%" if ctr else "—"
-                roas = bench.get("roas") or INDUSTRY_AVERAGES.get(ch,{}).get("roas")
-                row["ROAS"] = f"{roas:.1f}x" if roas else "—"
-                bench_rows.append(row)
-
-            if bench_rows:
-                bench_df = pd.DataFrame(bench_rows)
-                st.dataframe(bench_df, use_container_width=True, hide_index=True)
-                st.caption("⚠️ = Sri Lanka industry average used (no historical data for this channel/metric). Provide more data to improve accuracy.")
-
-                # Store benchmarks in session for use in planning
-                st.session_state["loaded_benchmarks"] = benchmarks_loaded
-            else:
-                st.info("Upload campaign data above to see your performance benchmarks.")
-
         # ── Benchmark table from uploaded data ──────────────────────────────
         if st.session_state.get("combined_df") is not None:
             df_loaded = st.session_state["combined_df"]
