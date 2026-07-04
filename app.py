@@ -956,15 +956,28 @@ if nav=="📊  New Campaign Plan":
         brief_auto_complete="[BRIEF_COMPLETE]" in last_agent
         num_user_msgs=len([m for m in st.session_state["chat_messages"] if m["role"]=="user"])
 
-        # Chat input always first — most prominent element
-        if user_input := st.chat_input("Message Orchy… (Enter to send, Shift+Enter for new line)"):
+        # ── Message input box — sits right below the chat ───────────────────
+        with st.form("orchy_form", clear_on_submit=True):
+            user_input = st.text_area(
+                "Message Orchy",
+                placeholder="Type your answer here… (Ctrl+Enter or click Send)",
+                label_visibility="collapsed",
+                height=90,
+                key="orchy_input"
+            )
+            col_send, col_back = st.columns([3, 1])
+            with col_send:
+                submitted = st.form_submit_button("Send →", use_container_width=True)
+            with col_back:
+                go_back = st.form_submit_button("← Back", use_container_width=True)
+
+        if go_back:
+            st.session_state["step"] = 2; st.rerun()
+
+        if submitted and user_input.strip():
             st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
-            with st.chat_message("user", avatar="🧑‍💼"):
-                st.markdown(user_input.strip())
-            with st.chat_message("assistant", avatar="🤖"):
-                with st.spinner("Orchy is thinking…"):
-                    reply=get_agent_response(st.session_state["chat_messages"],client_name,brand_name,data_summary)
-                st.markdown(reply.replace("[BRIEF_COMPLETE]","").strip())
+            with st.spinner("Orchy is thinking…"):
+                reply = get_agent_response(st.session_state["chat_messages"], client_name, brand_name, data_summary)
             st.session_state["chat_messages"].append({"role":"agent","content":reply})
             st.rerun()
 
@@ -1036,8 +1049,7 @@ if nav=="📊  New Campaign Plan":
             st.markdown('</div>',unsafe_allow_html=True)
             st.markdown("---")
 
-        # Back button below everything
-        if st.button("← Back to Data"): st.session_state["step"]=2; st.rerun()
+
 
     # STEP 4
     elif st.session_state["step"]==4:
@@ -1167,15 +1179,29 @@ elif nav=="📁  Saved Plans":
         edit_complete="[EDIT_COMPLETE]" in last_agent
         num_edit_msgs=len([m for m in st.session_state["edit_messages"] if m["role"]=="user"])
 
-        # Chat input first — most prominent
-        if edit_input := st.chat_input("Tell Orchy what to change… (Enter to send)"):
+        # ── Edit input box — sits right below the chat ──────────────────────
+        with st.form("edit_form", clear_on_submit=True):
+            edit_input = st.text_area(
+                "Edit instruction",
+                placeholder="Tell Orchy what to change… (click Send when ready)",
+                label_visibility="collapsed",
+                height=90,
+                key="edit_input"
+            )
+            col_esend, col_ecancel = st.columns([3, 1])
+            with col_esend:
+                edit_submitted = st.form_submit_button("Send →", use_container_width=True)
+            with col_ecancel:
+                edit_cancel = st.form_submit_button("← Cancel", use_container_width=True)
+
+        if edit_cancel:
+            st.session_state.update({"edit_mode":False,"edit_plan":{},"edit_messages":[]})
+            st.rerun()
+
+        if edit_submitted and edit_input.strip():
             st.session_state["edit_messages"].append({"role":"user","content":edit_input.strip()})
-            with st.chat_message("user",avatar="🧑‍💼"):
-                st.markdown(edit_input.strip())
-            with st.chat_message("assistant",avatar="🤖"):
-                with st.spinner("Orchy is thinking…"):
-                    reply=get_agent_response(st.session_state["edit_messages"],client_name,brand_name,"",mode="editing",existing_plan=original_plan)
-                st.markdown(reply.replace("[EDIT_COMPLETE]","").strip())
+            with st.spinner("Orchy is thinking…"):
+                reply=get_agent_response(st.session_state["edit_messages"],client_name,brand_name,"",mode="editing",existing_plan=original_plan)
             st.session_state["edit_messages"].append({"role":"agent","content":reply})
             st.rerun()
 
@@ -1206,9 +1232,7 @@ elif nav=="📁  Saved Plans":
                     except Exception as e: st.error(f"Error: {e}")
             st.markdown('</div>',unsafe_allow_html=True)
 
-        if st.button("← Cancel & Return to Saved Plans"):
-            st.session_state.update({"edit_mode":False,"edit_plan":{},"edit_messages":[]})
-            st.rerun()
+
 
     else:
         st.markdown('<div class="section-header">Saved Campaign Plans</div>',unsafe_allow_html=True)
