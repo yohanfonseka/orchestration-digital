@@ -387,7 +387,10 @@ CONVERSATION FLOW — cover in order, 1–2 questions at a time:
 3. Target audience description (demographics, interests, behaviours)
 4. Channels — ask about each: Facebook, Instagram, YouTube, Google Search, Google Display, TikTok, LinkedIn, Programmatic Display
 5. For each selected channel, ask for the TARGETABLE AUDIENCE SIZE from the platform estimator (Meta Audience Insights, Google Reach Planner, TikTok Audience Estimator). Be specific about where to find this.
-6. For each channel, ask what creative assets are available: Static Images, Videos, Carousels, Stories, UGC, Influencer Content — and the objective/placement for each
+6. For each channel, ask what creative assets are available: Static Images, Videos, Carousels, Stories, UGC, Influencer Content
+   - For each asset type, confirm: placement, objective, and KPI
+   - Ask: "Would you like to allocate separate budgets per creative type, or keep the total budget at platform level?"
+   - If per-creative: ask for the budget split across creative types for that channel
 7. Any additional context or constraints
 
 RULES:
@@ -432,13 +435,34 @@ def extract_brief_from_conversation(conversation):
     # Use last 12 messages (where all key info will be)
     trimmed = conversation[-12:] if len(conversation) > 12 else conversation
     conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in trimmed])
-    prompt = f"""Extract the campaign brief. Return ONLY valid JSON:
-{{"campaign_name":"","objective":"","total_budget":0,"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD","audience":"","channels":[],"audience_sizes":{{}},"assets":"","market":"Sri Lanka"}}
+    prompt = f"""Extract the campaign brief. Return ONLY valid JSON with this exact structure:
+{{
+  "campaign_name": "",
+  "objective": "",
+  "total_budget": 0,
+  "start_date": "YYYY-MM-DD",
+  "end_date": "YYYY-MM-DD",
+  "audience": "",
+  "channels": [],
+  "audience_sizes": {{}},
+  "assets": "",
+  "market": "Sri Lanka",
+  "channel_placements": {{
+    "ChannelName": [
+      {{"placement": "Feed", "kpi_type": "CPM", "assets": "Static Image", "objective": "Awareness", "budget": 0}}
+    ]
+  }}
+}}
+
+Notes:
+- channel_placements: only populate if the planner specified per-creative budget splits. If platform-level only, leave as empty object {{}}.
+- budget in channel_placements is in LKR. Sum of placements for a channel should equal that channel's total budget.
+- If no per-creative split was discussed, leave channel_placements as {{}}.
 
 CONVERSATION:
 {conv_text}
 
-JSON only."""
+JSON only, no markdown."""
     msg = client.messages.create(model="claude-sonnet-4-6",max_tokens=600,messages=[{"role":"user","content":prompt}])
     try:
         text=msg.content[0].text.strip().replace("```json","").replace("```","").strip()
@@ -533,7 +557,7 @@ Produce the complete updated media plan with all edits applied. Keep the same st
     return msg.content[0].text
 
 # ── Excel ──────────────────────────────────────────────────────────────────────
-def build_excel(brief_summary, plan_text, client_name, brand_name, budget_split, channel_kpi_data, plan_version="V1.0"):
+def build_excel(brief_summary, plan_text="", client_name="", brand_name="", budget_split={}, channel_kpi_data={}, plan_version="V1.0"):
     wb = Workbook(); ws = wb.active; ws.title = "Media Plan"
     navy="1E3A5F"; white="FFFFFF"; light="F0F4FA"; border_col="D0D5E0"
 
@@ -585,40 +609,79 @@ def build_excel(brief_summary, plan_text, client_name, brand_name, budget_split,
     except: days=0
 
     current_row=hdr_row+1; channel_totals={}
+
+    # creative_placements: dict of ch -> list of {placement, kpi_type, buying_rate, target_kpi, assets, budget}
+    # If planner specified per-creative budgets, channel_kpi_data[ch] may contain a "placements" list
     for ch,sub_lkr in budget_split.items():
         colour=next((v for k,v in channel_colours.items() if k.lower() in ch.lower()),navy)
         ws.row_dimensions[current_row].height=22
         ms(current_row,1,current_row,13,ch.upper(),bold=True,bg=colour,fg=white,align="left",size=10)
         current_row+=1
-        sub_usd=round(sub_lkr/usd_rate,2); billable=round(sub_lkr*1.05,0)
-        row_bg=light if current_row%2==0 else white; ws.row_dimensions[current_row].height=22
+
         kpi=channel_kpi_data.get(ch,{})
         src_note=" ⚠️" if kpi.get("is_industry_avg") else ""
-        data=[ch,info.get("objective",""),info.get("audience",""),kpi.get("kpi_type","CPM"),
-              kpi.get("buying_rate","—")+src_note,kpi.get("target_kpi","—"),
-              sub_usd,sub_lkr,billable,info.get("assets",""),start_str,end_str,days]
-        for ci,val in enumerate(data,1):
-            fmt='#,##0.00' if ci==7 else ('#,##0' if ci in (8,9) else None)
-            cs(current_row,ci,val,bg=row_bg,align="center" if ci>3 else "left",num_fmt=fmt)
-        channel_totals[ch]=sub_lkr; current_row+=1
+        placements=kpi.get("placements",[])  # list of per-creative placement rows
+
+        if placements:
+            # Write one row per creative placement
+            for pl in placements:
+                pl_lkr=pl.get("budget",round(sub_lkr/len(placements),0))
+                pl_usd=round(pl_lkr/usd_rate,2)
+                pl_is_meta=any(m in ch.lower() for m in ["facebook","instagram"])
+                pl_billable=round(pl_lkr*1.05,0) if pl_is_meta else pl_lkr
+                row_bg=light if current_row%2==0 else white
+                ws.row_dimensions[current_row].height=22
+                data=[pl.get("placement",ch),pl.get("objective",info.get("objective","")),
+                      info.get("audience",""),pl.get("kpi_type",kpi.get("kpi_type","CPM")),
+                      pl.get("buying_rate",kpi.get("buying_rate","—"))+src_note,
+                      pl.get("target_kpi",kpi.get("target_kpi","—")),
+                      pl_usd,pl_lkr,pl_billable,pl.get("assets",info.get("assets","")),
+                      start_str,end_str,days]
+                for ci,val in enumerate(data,1):
+                    fmt='#,##0.00' if ci==7 else ('#,##0' if ci in (8,9) else None)
+                    cs(current_row,ci,val,bg=row_bg,align="center" if ci>3 else "left",num_fmt=fmt)
+                current_row+=1
+            channel_totals[ch]=sub_lkr
+        else:
+            # Single row for channel total
+            meta_channels=["facebook","instagram"]
+            is_meta=any(m in ch.lower() for m in meta_channels)
+            sub_usd=round(sub_lkr/usd_rate,2); billable=round(sub_lkr*1.05,0) if is_meta else sub_lkr
+            row_bg=light if current_row%2==0 else white
+            ws.row_dimensions[current_row].height=22
+            data=[ch,info.get("objective",""),info.get("audience",""),kpi.get("kpi_type","CPM"),
+                  kpi.get("buying_rate","—")+src_note,kpi.get("target_kpi","—"),
+                  sub_usd,sub_lkr,billable,info.get("assets",""),start_str,end_str,days]
+            for ci,val in enumerate(data,1):
+                fmt='#,##0.00' if ci==7 else ('#,##0' if ci in (8,9) else None)
+                cs(current_row,ci,val,bg=row_bg,align="center" if ci>3 else "left",num_fmt=fmt)
+            channel_totals[ch]=sub_lkr; current_row+=1
 
     current_row+=1
-    total_working=sum(channel_totals.values())
-    agency_comm=round(total_working*commission,2); sub1=total_working+agency_comm
-    ssc=round(sub1*ssc_rate,2); sub2=sub1+ssc
+    # 5% markup applies to Meta (Facebook/Instagram) only — all other channels billable = spendable
+    meta_ch = ["facebook","instagram"]
+    billable_totals = {ch: (round(v*1.05,0) if any(m in ch.lower() for m in meta_ch) else v) for ch,v in channel_totals.items()}
+    total_billable = sum(billable_totals.values())
+    agency_comm=round(total_billable*commission,2)
+    sub1=total_billable+agency_comm
+    ssc=round(sub1*ssc_rate,2)
+    sub2=sub1+ssc
     vat=round(sub2*vat_rate,2)
 
-    # WHT only applies to YouTube and Google channels
+    # WHT only on YouTube and Google billable spend
     wht_channels=["youtube","google search","google display"]
-    wht_base=sum(v for k,v in channel_totals.items() if any(w in k.lower() for w in wht_channels))
+    wht_base=sum(billable_totals.get(ch,v) for ch,v in channel_totals.items() if any(w in ch.lower() for w in wht_channels))
     wht=round(wht_base*wht_rate,2) if wht_base>0 else 0
     total_invest=sub2+vat
 
-    summary=[("Total Working Investment (LKR)",total_working),("Agency Commission (10%)",agency_comm),
-             ("Sub Total",sub1),("SSC Levy (2.5641%)",ssc),("Sub Total",sub2),("VAT (18%)",vat)]
+    summary=[("Total Working Investment — Billable (LKR)",total_billable),
+             ("Agency Commission (10%)",agency_comm),
+             ("Sub Total",sub1),
+             ("SSC Levy (2.5641%)",ssc),
+             ("Sub Total",sub2),
+             ("VAT (18%)",vat)]
     if wht>0:
-        summary.append((f"Withholding Tax 16.3% (YouTube/Google only — LKR {wht_base:,.0f})",wht))
-        total_invest=sub2+vat  # WHT is deducted by client, not added to invoice
+        summary.append((f"Withholding Tax 16.3% (YouTube/Google — on LKR {wht_base:,.0f})",wht))
     summary.append(("TOTAL INVESTMENT (LKR)",total_invest))
     for label,val in summary:
         ws.row_dimensions[current_row].height=22
@@ -628,11 +691,6 @@ def build_excel(brief_summary, plan_text, client_name, brand_name, budget_split,
         cs(current_row,8,val,bold=is_total or is_sub,bg=bg,fg=fg_col,align="right",num_fmt='#,##0.00')
         for c in range(9,14): cs(current_row,c,bg=white)
         current_row+=1
-
-    ws2=wb.create_sheet("AI Plan"); ws2.column_dimensions["A"].width=120
-    ws2.cell(row=1,column=1,value="AI-GENERATED CAMPAIGN PLAN").font=Font(name="Inter",bold=True,size=13,color=navy)
-    for i,line in enumerate(plan_text.split("\n"),3):
-        c=ws2.cell(row=i,column=1,value=line); c.font=Font(name="Inter",size=10); c.alignment=Alignment(wrap_text=True)
 
     ws3=wb.create_sheet("KPI Summary")
     for i,w in enumerate([22,18,14,22,26,20],1): ws3.column_dimensions[get_column_letter(i)].width=w
@@ -868,7 +926,27 @@ if nav=="📊  New Campaign Plan":
                         objective=brief_summary.get("objective","Brand Awareness")
                         budget_split=calculate_budget_split(channels,total_budget,objective,audience_sizes,benchmarks)
                         st.session_state["budget_split"]=budget_split
-                        channel_kpi_data={ch:calculate_channel_kpis(ch,b,benchmarks,objective) for ch,b in budget_split.items()}
+                        channel_placements=brief_summary.get("channel_placements",{})
+                        channel_kpi_data={}
+                        for ch,b in budget_split.items():
+                            kpi=calculate_channel_kpis(ch,b,benchmarks,objective)
+                            # Attach per-creative placements if specified
+                            if ch in channel_placements and channel_placements[ch]:
+                                enriched_placements=[]
+                                for pl in channel_placements[ch]:
+                                    pl_budget=pl.get("budget",0) or round(b/len(channel_placements[ch]),0)
+                                    pl_kpi=calculate_channel_kpis(ch,pl_budget,benchmarks,pl.get("objective",objective))
+                                    enriched_placements.append({
+                                        "placement": pl.get("placement",""),
+                                        "kpi_type":  pl.get("kpi_type",pl_kpi["kpi_type"]),
+                                        "buying_rate": pl_kpi["buying_rate"],
+                                        "target_kpi":  pl_kpi["target_kpi"],
+                                        "assets":    pl.get("assets",""),
+                                        "objective": pl.get("objective",objective),
+                                        "budget":    pl_budget,
+                                    })
+                                kpi["placements"]=enriched_placements
+                            channel_kpi_data[ch]=kpi
                         st.session_state["channel_kpi_data"]=channel_kpi_data
                         data_gaps=get_data_gaps(channels,benchmarks)
                         plan_text=generate_media_plan(st.session_state["chat_messages"],client_name,brand_name,data_summary,budget_split,channel_kpi_data,data_gaps)
@@ -961,7 +1039,11 @@ if nav=="📊  New Campaign Plan":
         with cd:
             st.markdown('<div class="green-btn">',unsafe_allow_html=True)
             if st.button("➕ New Plan",use_container_width=True):
-                st.session_state.update({"step":1,"generated_plan":None,"chat_messages":[],"brief_summary":{},"budget_split":{},"channel_kpi_data":{}})
+                # Full reset — clear everything including client/brand selection
+                for k in ["step","brief","selected_client","selected_brand","combined_df",
+                          "generated_plan","chat_messages","brief_summary",
+                          "budget_split","channel_kpi_data","edit_mode","edit_plan","edit_messages"]:
+                    st.session_state[k] = 1 if k=="step" else ([] if k in ["chat_messages","edit_messages"] else ({} if k not in ["selected_client","selected_brand","combined_df","generated_plan"] else None))
                 st.rerun()
             st.markdown('</div>',unsafe_allow_html=True)
 
