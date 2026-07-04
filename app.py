@@ -845,17 +845,24 @@ if nav=="📊  New Campaign Plan":
             with c1: st.markdown(f'<div class="metric-card"><div class="metric-value">{len(saved_files)}</div><div class="metric-label">Saved Files</div></div>',unsafe_allow_html=True)
             with c2: st.markdown(f'<div class="metric-card"><div class="metric-value">{total_rows:,}</div><div class="metric-label">Total Rows</div></div>',unsafe_allow_html=True)
             with c3: st.markdown(f'<div class="metric-card"><div class="metric-value">{brand_name}</div><div class="metric-label">Brand</div></div>',unsafe_allow_html=True)
+
+            # FIX: load dfs OUTSIDE expander so combined_df is always set
             dfs=[]
+            for f in saved_files:
+                try: dfs.append(pd.read_json(io.StringIO(f["data_json"])))
+                except: pass
+            if dfs:
+                st.session_state["combined_df"]=pd.concat(dfs,ignore_index=True)
+
             with st.expander("📁 Manage saved files"):
                 for f in saved_files:
                     ca,cb,cc=st.columns([3,2,1])
                     ca.markdown(f"📄 **{f['file_name']}**")
                     cb.markdown(f"<span style='color:#8a93a8;font-size:0.82rem;'>{f.get('row_count',0):,} rows · {f['uploaded_at'][:10]}</span>",unsafe_allow_html=True)
                     if cc.button("🗑",key=f"del_{f['id']}"): delete_brand_data_file(sb,f["id"]); st.rerun()
-                    try: dfs.append(pd.read_json(io.StringIO(f["data_json"])))
-                    except: pass
-            if dfs: st.session_state["combined_df"]=pd.concat(dfs,ignore_index=True)
-        else: st.info(f"No historical data saved for **{brand_name}** yet.")
+        else:
+            st.info(f"No historical data saved for **{brand_name}** yet.")
+
         st.markdown('<div class="section-header">Upload New Files</div>',unsafe_allow_html=True)
         uploaded_files=st.file_uploader("Drop files here",type=["csv","xlsx","xls"],accept_multiple_files=True)
         if uploaded_files:
@@ -865,12 +872,16 @@ if nav=="📊  New Campaign Plan":
                 if st.button(f"💾 Save {len(new_dfs)} file(s) to {brand_name}",use_container_width=True):
                     for fname,df in new_dfs: save_brand_data(sb,brand_id,fname,df.to_json(),len(df))
                     st.success("✅ Saved!"); st.rerun()
+                # FIX: always merge into combined_df immediately on upload
                 new_combined=pd.concat([d for _,d in new_dfs],ignore_index=True)
                 existing=st.session_state.get("combined_df")
                 st.session_state["combined_df"]=pd.concat([existing,new_combined],ignore_index=True) if existing is not None else new_combined
+                # FIX: clear loaded_benchmarks so benchmark table regenerates with new data
+                st.session_state.pop("loaded_benchmarks", None)
         # ── Benchmark table from uploaded data ──────────────────────────────
         if st.session_state.get("combined_df") is not None:
             df_loaded = st.session_state["combined_df"]
+            # Always recompute benchmarks fresh from current combined_df
             benchmarks_loaded = extract_channel_benchmarks(df_loaded)
             st.session_state["loaded_benchmarks"] = benchmarks_loaded
 
