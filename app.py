@@ -335,19 +335,34 @@ def get_data_gaps(channels, benchmarks):
     return gaps
 
 def summarise_dataframe(df):
-    lines = [f"Rows: {len(df)}, Columns: {len(df.columns)}",
-             f"Columns: {', '.join(df.columns.tolist())}","","Sample data (first 10 rows):",
-             df.head(10).to_string(index=False),"","Numeric statistics:",df.describe().to_string()]
+    """Compact summary — benchmarks only, no raw data rows. Saves ~60% tokens."""
     col_lower = {c.lower():c for c in df.columns}
-    extras = []
-    for metric in ["cpm","cpc","ctr","roas","cpa","cpv","spend","impressions","clicks","conversions","reach"]:
+    lines = [f"Dataset: {len(df):,} rows, {len(df.columns)} columns",
+             f"Columns: {', '.join(df.columns.tolist())}","","Performance benchmarks:"]
+    for metric in ["cpm","cpc","ctr","roas","cpa","cpv","spend","impressions","clicks","conversions","reach","frequency"]:
         matches = [c for cl,c in col_lower.items() if metric in cl]
         if matches:
             try:
                 vals = pd.to_numeric(df[matches[0]],errors="coerce").dropna()
-                if len(vals)>0: extras.append(f"  {matches[0]}: mean={vals.mean():.2f}, median={vals.median():.2f}, min={vals.min():.2f}, max={vals.max():.2f}")
+                if len(vals)>0:
+                    lines.append(f"  {matches[0]}: avg={vals.mean():.2f}, median={vals.median():.2f}, min={vals.min():.2f}, max={vals.max():.2f} (n={len(vals)})")
             except: pass
-    if extras: lines += ["","Key performance benchmarks:"]+extras
+    # Channel breakdown if available
+    ch_col = next((c for cl,c in col_lower.items() if any(k in cl for k in ["channel","platform","campaign name","source"])), None)
+    if ch_col:
+        lines += ["","Channel breakdown:"]
+        for ch_val in df[ch_col].dropna().unique()[:12]:
+            sub = df[df[ch_col]==ch_val]
+            sub_metrics = []
+            for m in ["cpm","cpc","ctr","roas"]:
+                sub_matches = [c for cl,c in {cc.lower():cc for cc in sub.columns}.items() if m in cl]
+                if sub_matches:
+                    try:
+                        v = pd.to_numeric(sub[sub_matches[0]],errors="coerce").dropna()
+                        if len(v)>0: sub_metrics.append(f"{m}={v.mean():.2f}")
+                    except: pass
+            if sub_metrics:
+                lines.append(f"  {ch_val} ({len(sub)} rows): {', '.join(sub_metrics)}")
     return "\n".join(lines)
 
 def format_lkr(v):
@@ -396,25 +411,35 @@ All budgets in LKR."""
 def get_agent_response(messages, client_name, brand_name, data_summary, mode="planning", existing_plan=""):
     client = get_anthropic_client()
     if mode=="editing":
-        system = EDIT_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nORIGINAL PLAN:\n{existing_plan[:3000]}"
+        system = EDIT_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nORIGINAL PLAN:\n{existing_plan[:2000]}"
     else:
-        system = PLANNING_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nHISTORICAL DATA:\n{data_summary[:3000]}"
-    api_messages = [{"role":m["role"].replace("agent","assistant"),"content":m["content"]} for m in messages]
-    response = client.messages.create(model="claude-sonnet-4-6",max_tokens=1000,system=system,messages=api_messages)
+        # Data summary only in system prompt once — not repeated in messages
+        system = PLANNING_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nHISTORICAL BENCHMARKS:\n{data_summary[:1500]}"
+    # Keep only last 8 messages to limit context tokens
+    trimmed = messages[-8:] if len(messages) > 8 else messages
+    # If trimmed, prepend a brief context note
+    if len(messages) > 8:
+        earlier = messages[:-8]
+        summary_note = f"[Earlier in conversation: {len(earlier)} messages covering initial brief details]"
+        trimmed = [{"role":"user","content":summary_note}] + trimmed
+    api_messages = [{"role":m["role"].replace("agent","assistant"),"content":m["content"]} for m in trimmed]
+    response = client.messages.create(model="claude-sonnet-4-6",max_tokens=800,system=system,messages=api_messages)
     return response.content[0].text
 
 def extract_brief_from_conversation(conversation):
+    """Extract brief JSON from conversation — uses last 12 messages only to save tokens."""
     client = get_anthropic_client()
-    conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in conversation])
-    prompt = f"""Extract the campaign brief from this conversation. Return ONLY valid JSON with these fields:
-campaign_name, objective, total_budget (number LKR), start_date (YYYY-MM-DD), end_date (YYYY-MM-DD),
-audience, channels (array), audience_sizes (object: channel->integer), assets (string), market (default "Sri Lanka")
+    # Use last 12 messages (where all key info will be)
+    trimmed = conversation[-12:] if len(conversation) > 12 else conversation
+    conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in trimmed])
+    prompt = f"""Extract the campaign brief. Return ONLY valid JSON:
+{{"campaign_name":"","objective":"","total_budget":0,"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD","audience":"","channels":[],"audience_sizes":{{}},"assets":"","market":"Sri Lanka"}}
 
 CONVERSATION:
 {conv_text}
 
-JSON only, no markdown."""
-    msg = client.messages.create(model="claude-sonnet-4-6",max_tokens=800,messages=[{"role":"user","content":prompt}])
+JSON only."""
+    msg = client.messages.create(model="claude-sonnet-4-6",max_tokens=600,messages=[{"role":"user","content":prompt}])
     try:
         text=msg.content[0].text.strip().replace("```json","").replace("```","").strip()
         return json.loads(text)
@@ -423,53 +448,66 @@ JSON only, no markdown."""
                 "end_date":str(date.today()),"audience":"","channels":[],"audience_sizes":{},"assets":"","market":"Sri Lanka"}
 
 def generate_media_plan(conversation, client_name, brand_name, data_summary, budget_split, channel_kpi_data, data_gaps):
+    """Optimised: uses pre-calculated numbers + compact conversation summary instead of raw history."""
     client = get_anthropic_client()
-    conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in conversation])
-    split_lines = [f"  {ch}: LKR {b:,.0f} | {channel_kpi_data.get(ch,{}).get('kpi_type','CPM')} | Rate: {channel_kpi_data.get(ch,{}).get('buying_rate','—')} | Target: {channel_kpi_data.get(ch,{}).get('target_kpi','—')} | Source: {channel_kpi_data.get(ch,{}).get('data_source','—')}" for ch,b in budget_split.items()]
-    gaps_note = ("\n\nDATA GAPS (industry averages used):\n" + "\n".join(data_gaps)) if data_gaps else ""
+    # Use only last 10 conversation messages — key details already extracted into budget_split/channel_kpi_data
+    trimmed = conversation[-10:] if len(conversation) > 10 else conversation
+    conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in trimmed])
+    split_lines = [f"  {ch}: LKR {b:,.0f} | {channel_kpi_data.get(ch,{}).get('kpi_type','CPM')} | Buying Rate: {channel_kpi_data.get(ch,{}).get('buying_rate','—')} | Target: {channel_kpi_data.get(ch,{}).get('target_kpi','—')} | Source: {channel_kpi_data.get(ch,{}).get('data_source','—')}" for ch,b in budget_split.items()]
+    gaps_note = ("\nINDUSTRY AVERAGES USED FOR: " + ", ".join([g.split(":")[0].replace("**","") for g in data_gaps])) if data_gaps else ""
 
-    prompt = f"""You are a senior digital media planner. Generate a complete professional media plan.
+    prompt = f"""Senior digital media planner. Generate a concise, structured media plan.
 
 CLIENT: {client_name} | BRAND: {brand_name}
 
-PRE-CALCULATED BUDGET SPLIT & KPIs (use these exact numbers):
+BUDGET & KPIs (pre-calculated — use exactly):
 {chr(10).join(split_lines)}{gaps_note}
 
-PLANNING CONVERSATION:
+KEY BRIEF DETAILS:
 {conv_text}
 
-HISTORICAL DATA:
-{data_summary}
+HISTORICAL BENCHMARKS:
+{data_summary[:800]}
 
-Generate with these sections:
+OUTPUT FORMAT — keep each section tight and use tables where possible:
 
-1. EXECUTIVE SUMMARY (3-4 sentences)
+## 1. EXECUTIVE SUMMARY
+2-3 sentences only.
 
-2. BUDGET ALLOCATION RATIONALE
-   Why each channel got its budget — audience size, historical efficiency, objective fit.
+## 2. CHANNEL STRATEGY
+One paragraph explaining budget split rationale.
 
-3. CHANNEL-BY-CHANNEL PLAN
-   For each channel (use pre-calculated numbers):
-   - Budget | KPI Type | Buying Rate | Target KPI
-   - Note if industry average was used instead of historical data
-   - Ad formats, creative assets with objectives, targeting, bidding, weekly pacing
+## 3. CHANNEL PLAN
+For each channel, use this exact table format:
+| Metric | Value |
+|--------|-------|
+| Budget | LKR X |
+| KPI Type | X |
+| Buying Rate | X |
+| Target KPI | X |
+| Ad Formats | X |
+| Targeting | X |
+| Creative Assets | X |
+| Data Source | X |
 
-4. CREATIVE ASSET PLAN
-   Asset | Format | Platform | Placement | Objective | KPI | Specs
+## 4. CREATIVE ASSET MATRIX
+| Asset Type | Platform | Placement | Objective | KPI Target |
+|------------|----------|-----------|-----------|------------|
 
-5. REACH & FREQUENCY PROJECTIONS
-   Estimated reach % and avg frequency per platform based on audience sizes and budgets.
+## 5. KPI SUMMARY
+| Channel | Budget (LKR) | KPI Type | Buying Rate | Target KPI |
+|---------|-------------|----------|-------------|------------|
 
-6. KPI SUMMARY TABLE
-   | Channel | Budget (LKR) | KPI Type | Buying Rate | Target KPI | Data Source |
+## 6. OPTIMISATION ROADMAP
+| Week | Actions |
+|------|---------|
 
-7. WEEKLY OPTIMISATION ROADMAP
+## 7. RISK FLAGS
+Bullet points only.
 
-8. RISK FLAGS & MITIGATION
+Be precise. Use LKR. Flag ⚠️ where industry averages used."""
 
-Use LKR throughout. Flag clearly where industry averages were used."""
-
-    msg = client.messages.create(model="claude-sonnet-4-6",max_tokens=5000,messages=[{"role":"user","content":prompt}])
+    msg = client.messages.create(model="claude-sonnet-4-6",max_tokens=3500,messages=[{"role":"user","content":prompt}])
     return msg.content[0].text
 
 def apply_plan_edits(edit_conversation, original_plan, client_name, brand_name, budget_split, channel_kpi_data):
@@ -568,10 +606,20 @@ def build_excel(brief_summary, plan_text, client_name, brand_name, budget_split,
     total_working=sum(channel_totals.values())
     agency_comm=round(total_working*commission,2); sub1=total_working+agency_comm
     ssc=round(sub1*ssc_rate,2); sub2=sub1+ssc
-    vat=round(sub2*vat_rate,2); wht=round(sub2*wht_rate,2); total_invest=sub2+vat
+    vat=round(sub2*vat_rate,2)
+
+    # WHT only applies to YouTube and Google channels
+    wht_channels=["youtube","google search","google display"]
+    wht_base=sum(v for k,v in channel_totals.items() if any(w in k.lower() for w in wht_channels))
+    wht=round(wht_base*wht_rate,2) if wht_base>0 else 0
+    total_invest=sub2+vat
+
     summary=[("Total Working Investment (LKR)",total_working),("Agency Commission (10%)",agency_comm),
-             ("Sub Total",sub1),("SSC Levy (2.5641%)",ssc),("Sub Total",sub2),
-             ("VAT (18%)",vat),("Withholding Tax (16.3%)",wht),("TOTAL INVESTMENT (LKR)",total_invest)]
+             ("Sub Total",sub1),("SSC Levy (2.5641%)",ssc),("Sub Total",sub2),("VAT (18%)",vat)]
+    if wht>0:
+        summary.append((f"Withholding Tax 16.3% (YouTube/Google only — LKR {wht_base:,.0f})",wht))
+        total_invest=sub2+vat  # WHT is deducted by client, not added to invoice
+    summary.append(("TOTAL INVESTMENT (LKR)",total_invest))
     for label,val in summary:
         ws.row_dimensions[current_row].height=22
         is_total="TOTAL INVESTMENT" in label; is_sub=label.startswith("Sub") or label.startswith("Total W")
@@ -887,24 +935,20 @@ if nav=="📊  New Campaign Plan":
                              "Target KPI":kpi.get("target_kpi","—"),"Data Source":kpi.get("data_source","—")})
             st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
 
-        st.markdown('<div class="section-header">Full Media Plan</div>',unsafe_allow_html=True)
-        st.markdown(f'<div class="plan-card">{plan_text.replace(chr(10),"<br>")}</div>',unsafe_allow_html=True)
-
-        st.markdown("---")
+        # ── Action buttons at the TOP ────────────────────────────────────────
+        pv=get_plan_version(sb,brief_summary.get("campaign_name",""),st.session_state["selected_brand"]["id"])
+        excel_bytes=build_excel(brief_summary,plan_text,client_name,brand_name,budget_split,channel_kpi_data,pv)
         ca,cb,cc,cd=st.columns(4)
         with ca:
             st.download_button("📥 Download TXT",data=plan_text,
                 file_name=f"{brief_summary.get('campaign_name','plan').replace(' ','_')}_plan.txt",
                 mime="text/plain",use_container_width=True)
         with cb:
-            pv=get_plan_version(sb,brief_summary.get("campaign_name",""),st.session_state["selected_brand"]["id"])
-            excel_bytes=build_excel(brief_summary,plan_text,client_name,brand_name,budget_split,channel_kpi_data,pv)
             st.download_button("📊 Download Excel",data=excel_bytes,
                 file_name=f"{brief_summary.get('campaign_name','plan').replace(' ','_')}_MediaPlan.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
         with cc:
             if st.button("💾 Save to Library",use_container_width=True):
-                pv=get_plan_version(sb,brief_summary.get("campaign_name",""),st.session_state["selected_brand"]["id"])
                 save_plan(sb,{"brand_id":st.session_state["selected_brand"]["id"],"client_name":client_name,
                     "brand_name":brand_name,"campaign_name":brief_summary.get("campaign_name",""),
                     "objective":brief_summary.get("objective",""),"total_budget":total_budget,
@@ -920,6 +964,28 @@ if nav=="📊  New Campaign Plan":
                 st.session_state.update({"step":1,"generated_plan":None,"chat_messages":[],"brief_summary":{},"budget_split":{},"channel_kpi_data":{}})
                 st.rerun()
             st.markdown('</div>',unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── Plan rendered as structured sections with tables ──────────────────
+        st.markdown('<div class="section-header">Media Plan</div>',unsafe_allow_html=True)
+
+        # Split plan into sections and render with st.markdown (handles tables natively)
+        sections = plan_text.split("## ")
+        if len(sections) <= 1:
+            # Fallback if no ## headers — render in expander to keep it compact
+            with st.expander("📄 View Full Plan", expanded=True):
+                st.markdown(plan_text)
+        else:
+            for section in sections:
+                if not section.strip(): continue
+                lines = section.strip().split("\n",1)
+                title = lines[0].strip()
+                body = lines[1].strip() if len(lines)>1 else ""
+                # Show exec summary expanded, rest collapsed
+                expanded = any(k in title.lower() for k in ["executive","summary","channel plan","kpi"])
+                with st.expander(f"**{title}**", expanded=expanded):
+                    st.markdown(body)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SAVED PLANS
