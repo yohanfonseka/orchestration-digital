@@ -154,6 +154,10 @@ def save_plan(sb, plan_data):
     try: sb.table("campaign_plans").insert(plan_data).execute(); return True
     except Exception as e: st.warning(f"Could not save: {e}"); return False
 
+def delete_plan(sb, plan_id):
+    try: sb.table("campaign_plans").delete().eq("id", plan_id).execute(); return True
+    except Exception as e: st.warning(f"Could not delete: {e}"); return False
+
 def load_saved_plans(sb):
     try: return sb.table("campaign_plans").select("*").order("created_at", desc=True).limit(50).execute().data or []
     except: return []
@@ -864,6 +868,87 @@ if nav=="📊  New Campaign Plan":
                 new_combined=pd.concat([d for _,d in new_dfs],ignore_index=True)
                 existing=st.session_state.get("combined_df")
                 st.session_state["combined_df"]=pd.concat([existing,new_combined],ignore_index=True) if existing is not None else new_combined
+        # ── Benchmark table from uploaded data ───────────────────────────────
+        if st.session_state.get("combined_df") is not None:
+            df_loaded = st.session_state["combined_df"]
+            benchmarks_loaded = extract_channel_benchmarks(df_loaded)
+
+            st.markdown('<div class="section-header">📊 Performance Benchmarks from Your Data</div>', unsafe_allow_html=True)
+            st.caption("These averages are extracted from your uploaded historical data and will be used in the planning session to set buying rates and KPI targets.")
+
+            # Build objective-based cost table
+            obj_kpi_map = {
+                "Awareness / Reach": "cpm",
+                "Video Views":       "cpv",
+                "Traffic":           "cpc",
+                "Leads":             "cpa",
+                "Conversions":       "cpa",
+            }
+            bench_rows = []
+            for ch, bench in benchmarks_loaded.items():
+                if not bench or bench.get("rows",0)==0: continue
+                is_global = bench.get("is_global_fallback", False)
+                source_note = "⚠️ Industry Avg" if is_global else f"✅ Your Data ({bench.get('rows',0)} rows)"
+                row = {"Channel": ch, "Data Source": source_note}
+                for obj_label, metric in obj_kpi_map.items():
+                    val = bench.get(metric)
+                    if val:
+                        row[obj_label] = f"LKR {val:,.0f}" if metric != "cpm" or val >= 1 else f"LKR {val:.2f}"
+                    else:
+                        ia = INDUSTRY_AVERAGES.get(ch, {})
+                        ia_val = ia.get(metric)
+                        row[obj_label] = f"LKR {ia_val:,.0f} ⚠️" if ia_val else "—"
+                if "CTR %" not in row:
+                    ctr = bench.get("ctr") or INDUSTRY_AVERAGES.get(ch,{}).get("ctr")
+                    row["CTR %"] = f"{ctr:.2f}%" if ctr else "—"
+                roas = bench.get("roas") or INDUSTRY_AVERAGES.get(ch,{}).get("roas")
+                row["ROAS"] = f"{roas:.1f}x" if roas else "—"
+                bench_rows.append(row)
+
+            if bench_rows:
+                bench_df = pd.DataFrame(bench_rows)
+                st.dataframe(bench_df, use_container_width=True, hide_index=True)
+                st.caption("⚠️ = Sri Lanka industry average used (no historical data for this channel/metric). Provide more data to improve accuracy.")
+
+                # Store benchmarks in session for use in planning
+                st.session_state["loaded_benchmarks"] = benchmarks_loaded
+            else:
+                st.info("Upload campaign data above to see your performance benchmarks.")
+
+        # ── Benchmark table from uploaded data ──────────────────────────────
+        if st.session_state.get("combined_df") is not None:
+            df_loaded = st.session_state["combined_df"]
+            benchmarks_loaded = extract_channel_benchmarks(df_loaded)
+            st.session_state["loaded_benchmarks"] = benchmarks_loaded
+
+            st.markdown('<div class="section-header">📊 Performance Benchmarks from Your Data</div>', unsafe_allow_html=True)
+            st.caption("Extracted from your uploaded data — used in planning to set buying rates and KPI targets. ⚠️ = Sri Lanka industry average (no historical data found).")
+
+            obj_kpi_map = {"Awareness/Reach":"cpm","Video Views":"cpv","Traffic":"cpc","Leads/Conversions":"cpa"}
+            bench_rows = []
+            for ch, bench in benchmarks_loaded.items():
+                if not bench or bench.get("rows",0)==0: continue
+                is_global = bench.get("is_global_fallback", False)
+                source = "⚠️ Industry Avg" if is_global else f"✅ Your Data ({bench.get('rows',0)} rows)"
+                row = {"Channel": ch, "Source": source}
+                for obj_label, metric in obj_kpi_map.items():
+                    val = bench.get(metric)
+                    if val:
+                        row[obj_label] = f"LKR {val:,.0f}"
+                    else:
+                        ia_val = INDUSTRY_AVERAGES.get(ch,{}).get(metric)
+                        row[obj_label] = f"LKR {ia_val:,.0f} ⚠️" if ia_val else "—"
+                ctr = bench.get("ctr") or INDUSTRY_AVERAGES.get(ch,{}).get("ctr")
+                row["CTR %"] = f"{ctr:.2f}%" if ctr else "—"
+                roas = bench.get("roas") or INDUSTRY_AVERAGES.get(ch,{}).get("roas")
+                row["ROAS"] = f"{roas:.1f}x" if roas else "—"
+                bench_rows.append(row)
+
+            if bench_rows:
+                st.dataframe(pd.DataFrame(bench_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("Upload campaign data above to see performance benchmarks.")
+
         st.markdown("---")
         c1,c2=st.columns(2)
         with c1:
@@ -907,8 +992,21 @@ if nav=="📊  New Campaign Plan":
         brief_auto_complete="[BRIEF_COMPLETE]" in last_agent
         num_user_msgs=len([m for m in st.session_state["chat_messages"] if m["role"]=="user"])
 
-        # Generate button above input when ready
+        # Chat input always first — most prominent element
+        if user_input := st.chat_input("Message Orchy… (Enter to send, Shift+Enter for new line)"):
+            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
+            with st.chat_message("user", avatar="🧑‍💼"):
+                st.markdown(user_input.strip())
+            with st.chat_message("assistant", avatar="🤖"):
+                with st.spinner("Orchy is thinking…"):
+                    reply=get_agent_response(st.session_state["chat_messages"],client_name,brand_name,data_summary)
+                st.markdown(reply.replace("[BRIEF_COMPLETE]","").strip())
+            st.session_state["chat_messages"].append({"role":"agent","content":reply})
+            st.rerun()
+
+        # Generate button — shown after 3+ messages
         if num_user_msgs>=3:
+            st.markdown("---")
             if brief_auto_complete:
                 st.success("✅ Orchy has all the information needed. Ready to generate your media plan!")
             else:
@@ -919,7 +1017,8 @@ if nav=="📊  New Campaign Plan":
                     try:
                         brief_summary=extract_brief_from_conversation(st.session_state["chat_messages"])
                         st.session_state["brief_summary"]=brief_summary
-                        benchmarks=extract_channel_benchmarks(st.session_state["combined_df"])
+                        # Use pre-computed benchmarks from step 2 if available — saves recomputing
+                        benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
                         channels=brief_summary.get("channels",[])
                         audience_sizes=brief_summary.get("audience_sizes",{})
                         total_budget=float(brief_summary.get("total_budget",0))
@@ -951,24 +1050,29 @@ if nav=="📊  New Campaign Plan":
                         data_gaps=get_data_gaps(channels,benchmarks)
                         plan_text=generate_media_plan(st.session_state["chat_messages"],client_name,brand_name,data_summary,budget_split,channel_kpi_data,data_gaps)
                         st.session_state["generated_plan"]=plan_text
+                        # Auto-save to library immediately
+                        pv_auto=get_plan_version(sb,brief_summary.get("campaign_name",""),st.session_state["selected_brand"]["id"])
+                        save_plan(sb,{"brand_id":st.session_state["selected_brand"]["id"],
+                            "client_name":client_name,"brand_name":brand_name,
+                            "campaign_name":brief_summary.get("campaign_name",""),
+                            "objective":brief_summary.get("objective",""),
+                            "total_budget":float(brief_summary.get("total_budget",0)),
+                            "start_date":brief_summary.get("start_date",""),
+                            "end_date":brief_summary.get("end_date",""),
+                            "channels":json.dumps(channels),
+                            "market":brief_summary.get("market","Sri Lanka"),
+                            "kpi_focus":"","plan_text":plan_text,"plan_version":pv_auto,
+                            "budget_split":json.dumps(budget_split),
+                            "channel_kpi_data":json.dumps(channel_kpi_data),
+                            "created_at":datetime.utcnow().isoformat()})
+                        st.session_state["auto_saved_version"]=pv_auto
                         st.session_state["step"]=4
                         st.rerun()
                     except Exception as e: st.error(f"Error: {e}")
             st.markdown('</div>',unsafe_allow_html=True)
             st.markdown("---")
 
-        # Native chat input — Enter to send, Shift+Enter for new line, clears automatically
-        if user_input := st.chat_input("Message Orchy… (Enter to send, Shift+Enter for new line)"):
-            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
-            with st.chat_message("user", avatar="🧑‍💼"):
-                st.markdown(user_input.strip())
-            with st.chat_message("assistant", avatar="🤖"):
-                with st.spinner("Orchy is thinking…"):
-                    reply=get_agent_response(st.session_state["chat_messages"],client_name,brand_name,data_summary)
-                st.markdown(reply.replace("[BRIEF_COMPLETE]","").strip())
-            st.session_state["chat_messages"].append({"role":"agent","content":reply})
-            st.rerun()
-
+        # Back button below everything
         if st.button("← Back to Data"): st.session_state["step"]=2; st.rerun()
 
     # STEP 4
@@ -1014,9 +1118,9 @@ if nav=="📊  New Campaign Plan":
             st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
 
         # ── Action buttons at the TOP ────────────────────────────────────────
-        pv=get_plan_version(sb,brief_summary.get("campaign_name",""),st.session_state["selected_brand"]["id"])
+        pv=st.session_state.get("auto_saved_version","V1.0")
         excel_bytes=build_excel(brief_summary,plan_text,client_name,brand_name,budget_split,channel_kpi_data,pv)
-        ca,cb,cc,cd=st.columns(4)
+        ca,cb,cc=st.columns(3)
         with ca:
             st.download_button("📥 Download TXT",data=plan_text,
                 file_name=f"{brief_summary.get('campaign_name','plan').replace(' ','_')}_plan.txt",
@@ -1026,26 +1130,15 @@ if nav=="📊  New Campaign Plan":
                 file_name=f"{brief_summary.get('campaign_name','plan').replace(' ','_')}_MediaPlan.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
         with cc:
-            if st.button("💾 Save to Library",use_container_width=True):
-                save_plan(sb,{"brand_id":st.session_state["selected_brand"]["id"],"client_name":client_name,
-                    "brand_name":brand_name,"campaign_name":brief_summary.get("campaign_name",""),
-                    "objective":brief_summary.get("objective",""),"total_budget":total_budget,
-                    "start_date":brief_summary.get("start_date",""),"end_date":brief_summary.get("end_date",""),
-                    "channels":json.dumps(list(budget_split.keys())),"market":brief_summary.get("market","Sri Lanka"),
-                    "kpi_focus":"","plan_text":plan_text,"plan_version":pv,
-                    "budget_split":json.dumps(budget_split),"channel_kpi_data":json.dumps(channel_kpi_data),
-                    "created_at":datetime.utcnow().isoformat()})
-                st.success(f"Saved as {pv}!")
-        with cd:
             st.markdown('<div class="green-btn">',unsafe_allow_html=True)
             if st.button("➕ New Plan",use_container_width=True):
-                # Full reset — clear everything including client/brand selection
-                for k in ["step","brief","selected_client","selected_brand","combined_df",
-                          "generated_plan","chat_messages","brief_summary",
+                for k in ["step","brief","selected_client","selected_brand","combined_df","loaded_benchmarks",
+                          "generated_plan","chat_messages","brief_summary","auto_saved_version",
                           "budget_split","channel_kpi_data","edit_mode","edit_plan","edit_messages"]:
-                    st.session_state[k] = 1 if k=="step" else ([] if k in ["chat_messages","edit_messages"] else ({} if k not in ["selected_client","selected_brand","combined_df","generated_plan"] else None))
+                    st.session_state[k] = 1 if k=="step" else ([] if k in ["chat_messages","edit_messages"] else None)
                 st.rerun()
             st.markdown('</div>',unsafe_allow_html=True)
+        st.success(f"✅ Plan auto-saved to library as **{pv}**")
 
         st.markdown("---")
 
@@ -1110,7 +1203,7 @@ elif nav=="📁  Saved Plans":
         edit_complete="[EDIT_COMPLETE]" in last_agent
         num_edit_msgs=len([m for m in st.session_state["edit_messages"] if m["role"]=="user"])
 
-        # Native chat input for edits
+        # Chat input first — most prominent
         if edit_input := st.chat_input("Tell Orchy what to change… (Enter to send)"):
             st.session_state["edit_messages"].append({"role":"user","content":edit_input.strip()})
             with st.chat_message("user",avatar="🧑‍💼"):
@@ -1122,6 +1215,7 @@ elif nav=="📁  Saved Plans":
             st.session_state["edit_messages"].append({"role":"agent","content":reply})
             st.rerun()
 
+        # Apply / Cancel below input
         if num_edit_msgs>=1:
             st.markdown("---")
             if edit_complete:
@@ -1148,8 +1242,7 @@ elif nav=="📁  Saved Plans":
                     except Exception as e: st.error(f"Error: {e}")
             st.markdown('</div>',unsafe_allow_html=True)
 
-        st.markdown("---")
-        if st.button("← Cancel Edit"):
+        if st.button("← Cancel & Return to Saved Plans"):
             st.session_state.update({"edit_mode":False,"edit_plan":{},"edit_messages":[]})
             st.rerun()
 
@@ -1189,23 +1282,37 @@ elif nav=="📁  Saved Plans":
                         st.markdown(plan.get("plan_text",""))
                         st.markdown("---")
 
-                        col_edit,col_dl=st.columns(2)
-                        with col_edit:
+                        col_edit2,col_del=st.columns(2)
+                        with col_edit2:
                             if st.button(f"✏️ Edit this Plan",key=f"edit_{plan['id']}",use_container_width=True):
                                 st.session_state.update({"edit_mode":True,"edit_plan":plan,"edit_messages":[]})
                                 st.rerun()
-                        with col_dl:
-                            try:
-                                bs=json.loads(plan.get("budget_split","{}"))
-                                ck=json.loads(plan.get("channel_kpi_data","{}"))
-                                bs_obj={"campaign_name":plan.get("campaign_name",""),"objective":plan.get("objective",""),
-                                        "start_date":plan.get("start_date",""),"end_date":plan.get("end_date",""),"audience":""}
-                                excel=build_excel(bs_obj,plan.get("plan_text",""),plan.get("client_name",""),plan.get("brand_name",""),bs,ck,version)
-                                st.download_button("📊 Download Excel",data=excel,
-                                    file_name=f"{plan.get('campaign_name','plan').replace(' ','_')}_{version}_MediaPlan.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    use_container_width=True,key=f"dl_{plan['id']}")
-                            except: pass
+                        with col_del:
+                            if st.button(f"🗑️ Delete",key=f"del_plan_{plan['id']}",use_container_width=True):
+                                st.session_state[f"confirm_del_{plan['id']}"]=True
+                                st.rerun()
+                        if st.session_state.get(f"confirm_del_{plan['id']}"):
+                            st.warning(f"Are you sure you want to delete **{plan.get('campaign_name','')} {plan.get('plan_version','')}**? This cannot be undone.")
+                            cy,cn=st.columns(2)
+                            if cy.button("Yes, delete it",key=f"yes_del_{plan['id']}"):
+                                delete_plan(sb,plan["id"])
+                                st.session_state.pop(f"confirm_del_{plan['id']}",None)
+                                st.success("Plan deleted.")
+                                st.rerun()
+                            if cn.button("Cancel",key=f"no_del_{plan['id']}"):
+                                st.session_state.pop(f"confirm_del_{plan['id']}",None)
+                                st.rerun()
+                        try:
+                            bs=json.loads(plan.get("budget_split","{}"))
+                            ck=json.loads(plan.get("channel_kpi_data","{}"))
+                            bs_obj={"campaign_name":plan.get("campaign_name",""),"objective":plan.get("objective",""),
+                                    "start_date":plan.get("start_date",""),"end_date":plan.get("end_date",""),"audience":""}
+                            excel=build_excel(bs_obj,plan.get("plan_text",""),plan.get("client_name",""),plan.get("brand_name",""),bs,ck,version)
+                            st.download_button("📊 Download Excel",data=excel,
+                                file_name=f"{plan.get('campaign_name','plan').replace(' ','_')}_{version}_MediaPlan.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,key=f"dl_{plan['id']}")
+                        except: pass
         except Exception as e: st.error(f"Could not load plans: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
