@@ -712,6 +712,21 @@ if nav=="📊  New Campaign Plan":
         brand_name=st.session_state["selected_brand"]["brand_name"]
         client_name=st.session_state["selected_client"]["client_name"]
         st.markdown(f'<div class="section-header">Historical Data — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style='background:#f0f4fa;border-left:4px solid #2d5a9b;border-radius:0 10px 10px 0;padding:16px 20px;margin-bottom:20px;'>
+          <div style='font-family:Plus Jakarta Sans,sans-serif;font-weight:700;color:#1e3a5f;font-size:0.92rem;margin-bottom:6px;'>📊 Why do we need your past campaign data?</div>
+          <div style='font-size:0.85rem;color:#4a5168;line-height:1.7;'>
+            Orchy uses your historical campaign data to make the plan <b>specific to your brand</b>, not generic.<br><br>
+            From your past data, Orchy will:<br>
+            &nbsp;&nbsp;• Calculate your <b>actual buying rates</b> — e.g. your real CPM on Facebook, not an industry estimate<br>
+            &nbsp;&nbsp;• Set <b>realistic KPI targets</b> based on what your campaigns have actually achieved<br>
+            &nbsp;&nbsp;• Identify your <b>most cost-efficient channels</b> to inform budget allocation<br><br>
+            <b>What to upload:</b> Export your campaign performance reports from Meta Ads Manager, Google Ads, TikTok Ads Manager, or any other platform. CSV or Excel files work. The more historical data you provide, the more accurate the plan.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         saved_files=get_brand_data_files(sb,brand_id)
         if saved_files:
             total_rows=sum(f.get("row_count",0) for f in saved_files)
@@ -761,46 +776,33 @@ if nav=="📊  New Campaign Plan":
         data_summary=summarise_dataframe(st.session_state["combined_df"])
 
         st.markdown(f'<div class="section-header">Plan with Orchy — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
-        st.caption("Orchy will guide you through the brief. Use Shift+Enter for new lines.")
 
+        # Initialise with Orchy greeting
         if not st.session_state["chat_messages"]:
             with st.spinner("Orchy is getting ready…"):
-                first=get_agent_response([{"role":"user","content":"Hello, I need to plan a new campaign."}],client_name,brand_name,data_summary)
+                first=get_agent_response(
+                    [{"role":"user","content":"Hello, I need to plan a new campaign."}],
+                    client_name,brand_name,data_summary
+                )
             st.session_state["chat_messages"]=[
                 {"role":"user","content":"Hello, I need to plan a new campaign."},
                 {"role":"agent","content":first}
             ]
             st.rerun()
 
-        # Render chat
-        st.markdown('<div class="chat-container"><div class="chat-header"><p class="chat-header-title">🤖 Orchy — Planning Agent</p><p class="chat-header-sub">AI-powered digital planning assistant</p></div><div class="chat-messages">',unsafe_allow_html=True)
+        # Render all messages using native st.chat_message
         for msg in st.session_state["chat_messages"]:
-            render_message(msg["role"],msg["content"].replace("[BRIEF_COMPLETE]","").strip())
-        st.markdown('<div id="chat-bottom"></div></div></div>',unsafe_allow_html=True)
-        st.markdown(AUTO_SCROLL_JS,unsafe_allow_html=True)
+            role_display = "assistant" if msg["role"]=="agent" else "user"
+            avatar = "🤖" if msg["role"]=="agent" else "🧑‍💼"
+            with st.chat_message(role_display, avatar=avatar):
+                st.markdown(msg["content"].replace("[BRIEF_COMPLETE]","").strip())
 
         last_agent=next((m["content"] for m in reversed(st.session_state["chat_messages"]) if m["role"]=="agent"),"")
         brief_auto_complete="[BRIEF_COMPLETE]" in last_agent
         num_user_msgs=len([m for m in st.session_state["chat_messages"] if m["role"]=="user"])
 
-        # Multi-line input using text_area + button
-        col_inp,col_btn=st.columns([5,1])
-        with col_inp:
-            user_input=st.text_area("Your message",placeholder="Type your answer here… (Shift+Enter for new line)",
-                                    label_visibility="collapsed",height=80,key="chat_input")
-        with col_btn:
-            st.markdown("<br>",unsafe_allow_html=True)
-            send=st.button("Send →",use_container_width=True)
-
-        if send and user_input.strip():
-            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
-            with st.spinner("Orchy is thinking…"):
-                reply=get_agent_response(st.session_state["chat_messages"],client_name,brand_name,data_summary)
-            st.session_state["chat_messages"].append({"role":"agent","content":reply})
-            st.rerun()
-
+        # Generate button above input when ready
         if num_user_msgs>=3:
-            st.markdown("---")
             if brief_auto_complete:
                 st.success("✅ Orchy has all the information needed. Ready to generate your media plan!")
             else:
@@ -827,8 +829,20 @@ if nav=="📊  New Campaign Plan":
                         st.rerun()
                     except Exception as e: st.error(f"Error: {e}")
             st.markdown('</div>',unsafe_allow_html=True)
+            st.markdown("---")
 
-        st.markdown("---")
+        # Native chat input — Enter to send, Shift+Enter for new line, clears automatically
+        if user_input := st.chat_input("Message Orchy… (Enter to send, Shift+Enter for new line)"):
+            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
+            with st.chat_message("user", avatar="🧑‍💼"):
+                st.markdown(user_input.strip())
+            with st.chat_message("assistant", avatar="🤖"):
+                with st.spinner("Orchy is thinking…"):
+                    reply=get_agent_response(st.session_state["chat_messages"],client_name,brand_name,data_summary)
+                st.markdown(reply.replace("[BRIEF_COMPLETE]","").strip())
+            st.session_state["chat_messages"].append({"role":"agent","content":reply})
+            st.rerun()
+
         if st.button("← Back to Data"): st.session_state["step"]=2; st.rerun()
 
     # STEP 4
@@ -937,28 +951,26 @@ elif nav=="📁  Saved Plans":
             ]
             st.rerun()
 
-        st.markdown('<div class="chat-container"><div class="chat-header"><p class="chat-header-title">✏️ Orchy — Plan Editor</p><p class="chat-header-sub">Describe the changes you need</p></div><div class="chat-messages">',unsafe_allow_html=True)
+        # Render edit chat using native components
         for msg in st.session_state["edit_messages"]:
-            render_message(msg["role"],msg["content"].replace("[EDIT_COMPLETE]","").strip())
-        st.markdown('<div id="chat-bottom"></div></div></div>',unsafe_allow_html=True)
-        st.markdown(AUTO_SCROLL_JS,unsafe_allow_html=True)
+            role_display="assistant" if msg["role"]=="agent" else "user"
+            avatar="🤖" if msg["role"]=="agent" else "🧑‍💼"
+            with st.chat_message(role_display,avatar=avatar):
+                st.markdown(msg["content"].replace("[EDIT_COMPLETE]","").strip())
 
         last_agent=next((m["content"] for m in reversed(st.session_state["edit_messages"]) if m["role"]=="agent"),"")
         edit_complete="[EDIT_COMPLETE]" in last_agent
         num_edit_msgs=len([m for m in st.session_state["edit_messages"] if m["role"]=="user"])
 
-        col_inp,col_btn=st.columns([5,1])
-        with col_inp:
-            edit_input=st.text_area("Your instruction",placeholder="e.g. Increase Facebook budget by 20% and remove LinkedIn",
-                                    label_visibility="collapsed",height=80,key="edit_input")
-        with col_btn:
-            st.markdown("<br>",unsafe_allow_html=True)
-            send_edit=st.button("Send →",use_container_width=True,key="send_edit")
-
-        if send_edit and edit_input.strip():
+        # Native chat input for edits
+        if edit_input := st.chat_input("Tell Orchy what to change… (Enter to send)"):
             st.session_state["edit_messages"].append({"role":"user","content":edit_input.strip()})
-            with st.spinner("Orchy is thinking…"):
-                reply=get_agent_response(st.session_state["edit_messages"],client_name,brand_name,"",mode="editing",existing_plan=original_plan)
+            with st.chat_message("user",avatar="🧑‍💼"):
+                st.markdown(edit_input.strip())
+            with st.chat_message("assistant",avatar="🤖"):
+                with st.spinner("Orchy is thinking…"):
+                    reply=get_agent_response(st.session_state["edit_messages"],client_name,brand_name,"",mode="editing",existing_plan=original_plan)
+                st.markdown(reply.replace("[EDIT_COMPLETE]","").strip())
             st.session_state["edit_messages"].append({"role":"agent","content":reply})
             st.rerun()
 
