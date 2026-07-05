@@ -420,17 +420,27 @@ def get_agent_response(messages, client_name, brand_name, data_summary, mode="pl
     if mode=="editing":
         system = EDIT_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nORIGINAL PLAN:\n{existing_plan[:2000]}"
     else:
-        # Data summary only in system prompt once — not repeated in messages
         system = PLANNING_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nHISTORICAL BENCHMARKS:\n{data_summary[:1500]}"
-    # Keep only last 8 messages to limit context tokens
-    trimmed = messages[-8:] if len(messages) > 8 else messages
-    # If trimmed, prepend a brief context note
-    if len(messages) > 8:
-        earlier = messages[:-8]
-        summary_note = f"[Earlier in conversation: {len(earlier)} messages covering initial brief details]"
-        trimmed = [{"role":"user","content":summary_note}] + trimmed
+
+    # Send full conversation for planning — Orchy needs all context to plan correctly.
+    # For very long chats (20+ msgs), summarise only the oldest messages to save tokens
+    # while keeping recent context intact.
+    if len(messages) <= 20:
+        trimmed = messages
+    else:
+        # Summarise earliest messages into a compact brief, keep last 16 in full
+        early = messages[:-16]
+        recent = messages[-16:]
+        # Build a compact summary of early messages
+        early_text = " | ".join([
+            f"{'P' if m['role']=='user' else 'A'}: {m['content'][:120].replace(chr(10),' ')}"
+            for m in early
+        ])
+        summary_note = f"[Summary of earlier discussion: {early_text}]"
+        trimmed = [{"role":"user","content":summary_note}] + recent
+
     api_messages = [{"role":m["role"].replace("agent","assistant"),"content":m["content"]} for m in trimmed]
-    response = client.messages.create(model="claude-sonnet-4-6",max_tokens=800,system=system,messages=api_messages)
+    response = client.messages.create(model="claude-sonnet-4-6",max_tokens=1000,system=system,messages=api_messages)
     return response.content[0].text
 
 def extract_brief_from_conversation(conversation):
