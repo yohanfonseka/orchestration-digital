@@ -426,18 +426,24 @@ RULES:
 
 EDIT_SYSTEM = """You are Orchy, an expert digital media planning agent. You are helping a planner edit an existing campaign plan.
 
-The original plan is provided below. Your job is to:
-1. Understand what changes the planner wants to make
-2. Ask clarifying questions if needed
-3. When you have enough information, confirm the changes and end with exactly: [EDIT_COMPLETE]
+You have access to:
+1. The original planning conversation that created this plan (so you understand WHY decisions were made)
+2. The full plan that was generated from that conversation
+
+Your job is to:
+1. Use the original conversation context to understand the strategic intent behind the plan
+2. Understand what changes the planner wants to make
+3. Ask clarifying questions if needed
+4. When you have enough information, confirm the changes and end with exactly: [EDIT_COMPLETE]
 
 Be specific — confirm budget numbers, channel changes, and KPI impacts before finalising.
 All budgets in LKR."""
 
-def get_agent_response(messages, client_name, brand_name, data_summary, mode="planning", existing_plan=""):
+def get_agent_response(messages, client_name, brand_name, data_summary, mode="planning", existing_plan="", original_conversation=""):
     client = get_anthropic_client()
     if mode=="editing":
-        system = EDIT_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nORIGINAL PLAN:\n{existing_plan[:2000]}"
+        conv_context = f"\n\nORIGINAL PLANNING CONVERSATION (context for why decisions were made):\n{original_conversation[:3000]}" if original_conversation else ""
+        system = EDIT_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}{conv_context}\n\nORIGINAL PLAN:\n{existing_plan[:2000]}"
     else:
         system = PLANNING_SYSTEM + f"\n\nCLIENT: {client_name}\nBRAND: {brand_name}\n\nHISTORICAL BENCHMARKS:\n{data_summary[:1500]}"
 
@@ -582,13 +588,15 @@ Use LKR throughout. Flag ⚠️ clearly where industry averages were used instea
     )
     return msg.content[0].text
 
-def apply_plan_edits(edit_conversation, original_plan, client_name, brand_name, budget_split, channel_kpi_data):
+def apply_plan_edits(edit_conversation, original_plan, client_name, brand_name, budget_split, channel_kpi_data, original_conversation=""):
     client = get_anthropic_client()
     conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in edit_conversation])
     split_lines = [f"  {ch}: LKR {b:,.0f} | {channel_kpi_data.get(ch,{}).get('kpi_type','CPM')} | Rate: {channel_kpi_data.get(ch,{}).get('buying_rate','—')} | Target: {channel_kpi_data.get(ch,{}).get('target_kpi','—')}" for ch,b in budget_split.items()]
+    original_context = f"\n\nORIGINAL PLANNING CONVERSATION (strategic context):\n{original_conversation[:2000]}" if original_conversation else ""
     prompt = f"""You are a senior digital media planner. Apply the requested edits to this media plan.
 
 CLIENT: {client_name} | BRAND: {brand_name}
+{original_context}
 
 ORIGINAL BUDGET SPLIT:
 {chr(10).join(split_lines)}
@@ -599,7 +607,7 @@ EDIT INSTRUCTIONS FROM PLANNER:
 ORIGINAL PLAN:
 {original_plan}
 
-Produce the complete updated media plan with all edits applied. Keep the same structure but update all affected numbers, budgets, KPIs, and rationale. Clearly note what was changed at the top under "CHANGES FROM PREVIOUS VERSION"."""
+Produce the complete updated media plan with all edits applied. Keep the same structure but update all affected numbers, budgets, KPIs, and rationale. Clearly note what was changed at the top under "## CHANGES FROM PREVIOUS VERSION"."""
 
     msg = client.messages.create(model="claude-sonnet-4-6",max_tokens=5000,messages=[{"role":"user","content":prompt}])
     return msg.content[0].text
@@ -1060,6 +1068,7 @@ if nav=="📊  New Campaign Plan":
                             "kpi_focus":"","plan_text":plan_text,"plan_version":pv_auto,
                             "budget_split":json.dumps(budget_split),
                             "channel_kpi_data":json.dumps(channel_kpi_data),
+                            "planning_conversation":json.dumps(st.session_state.get("chat_messages",[])),
                             "created_at":datetime.utcnow().isoformat()})
                         st.session_state["auto_saved_version"]=pv_auto
                         st.session_state["step"]=4
@@ -1179,6 +1188,11 @@ elif nav=="📁  Saved Plans":
         original_plan=ep.get("plan_text","")
         budget_split=json.loads(ep.get("budget_split","{}"))
         channel_kpi_data=json.loads(ep.get("channel_kpi_data","{}"))
+        original_conversation=json.loads(ep.get("planning_conversation","[]"))
+        original_conv_text="\n".join([
+            f"{'PLANNER' if m['role']=='user' else 'ORCHY'}: {m['content']}"
+            for m in original_conversation if m.get("role") in ["user","agent"]
+        ])
 
         st.markdown(f'<div class="section-header">✏️ Editing — {client_name} · {brand_name} · {ep.get("campaign_name","")} {ep.get("plan_version","")}</div>',unsafe_allow_html=True)
         st.caption("Tell Orchy what you'd like to change. Be specific about budgets, channels, or strategy adjustments.")
@@ -1187,7 +1201,9 @@ elif nav=="📁  Saved Plans":
             with st.spinner("Orchy is reviewing the plan…"):
                 first=get_agent_response(
                     [{"role":"user","content":"I need to edit this campaign plan. Please review it and ask me what I'd like to change."}],
-                    client_name,brand_name,"",mode="editing",existing_plan=original_plan
+                    client_name,brand_name,"",mode="editing",
+                    existing_plan=original_plan,
+                    original_conversation=original_conv_text
                 )
             st.session_state["edit_messages"]=[
                 {"role":"user","content":"I need to edit this campaign plan. Please review it and ask me what I'd like to change."},
@@ -1210,7 +1226,11 @@ elif nav=="📁  Saved Plans":
         if edit_input := st.chat_input("Tell Orchy what to change… (Enter to send, Shift+Enter for new line)"):
             st.session_state["edit_messages"].append({"role":"user","content":edit_input.strip()})
             with st.spinner("Orchy is thinking…"):
-                reply=get_agent_response(st.session_state["edit_messages"],client_name,brand_name,"",mode="editing",existing_plan=original_plan)
+                reply=get_agent_response(
+                    st.session_state["edit_messages"],client_name,brand_name,"",
+                    mode="editing",existing_plan=original_plan,
+                    original_conversation=original_conv_text
+                )
             st.session_state["edit_messages"].append({"role":"agent","content":reply})
             st.rerun()
 
@@ -1225,7 +1245,7 @@ elif nav=="📁  Saved Plans":
             if st.button("🚀 Apply Edits & Generate New Version",use_container_width=True):
                 with st.spinner("🤖 Applying edits and generating updated plan…"):
                     try:
-                        new_plan=apply_plan_edits(st.session_state["edit_messages"],original_plan,client_name,brand_name,budget_split,channel_kpi_data)
+                        new_plan=apply_plan_edits(st.session_state["edit_messages"],original_plan,client_name,brand_name,budget_split,channel_kpi_data,original_conv_text)
                         new_version=get_plan_version(sb,ep.get("campaign_name",""),ep.get("brand_id",""))
                         save_plan(sb,{"brand_id":ep.get("brand_id"),"client_name":client_name,"brand_name":brand_name,
                             "campaign_name":ep.get("campaign_name",""),"objective":ep.get("objective",""),
@@ -1282,7 +1302,7 @@ elif nav=="📁  Saved Plans":
                         col_edit2,col_del=st.columns(2)
                         with col_edit2:
                             if st.button(f"✏️ Edit this Plan",key=f"edit_{plan['id']}",use_container_width=True):
-                                st.session_state.update({"edit_mode":True,"edit_plan":plan,"edit_messages":[]})
+                                st.session_state.update({"edit_mode":True,"edit_plan":plan,"edit_messages":[],"edit_original_conversation":json.loads(plan.get("planning_conversation","[]"))})
                                 st.rerun()
                         with col_del:
                             if st.button(f"🗑️ Delete",key=f"del_plan_{plan['id']}",use_container_width=True):
