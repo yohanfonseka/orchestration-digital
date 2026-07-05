@@ -505,66 +505,81 @@ JSON only, no markdown."""
                 "end_date":str(date.today()),"audience":"","channels":[],"audience_sizes":{},"assets":"","market":"Sri Lanka"}
 
 def generate_media_plan(conversation, client_name, brand_name, data_summary, budget_split, channel_kpi_data, data_gaps):
-    """Optimised: uses pre-calculated numbers + compact conversation summary instead of raw history."""
+    """Generate full media plan from conversation + pre-calculated budget/KPI data."""
     client = get_anthropic_client()
-    # Use only last 10 conversation messages — key details already extracted into budget_split/channel_kpi_data
-    trimmed = conversation[-10:] if len(conversation) > 10 else conversation
-    conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in trimmed])
-    split_lines = [f"  {ch}: LKR {b:,.0f} | {channel_kpi_data.get(ch,{}).get('kpi_type','CPM')} | Buying Rate: {channel_kpi_data.get(ch,{}).get('buying_rate','—')} | Target: {channel_kpi_data.get(ch,{}).get('target_kpi','—')} | Source: {channel_kpi_data.get(ch,{}).get('data_source','—')}" for ch,b in budget_split.items()]
-    gaps_note = ("\nINDUSTRY AVERAGES USED FOR: " + ", ".join([g.split(":")[0].replace("**","") for g in data_gaps])) if data_gaps else ""
+    conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in conversation])
+    split_lines = [
+        f"  {ch}: LKR {b:,.0f} | KPI: {channel_kpi_data.get(ch,{}).get('kpi_type','CPM')} | "
+        f"Buying Rate: {channel_kpi_data.get(ch,{}).get('buying_rate','—')} | "
+        f"Target: {channel_kpi_data.get(ch,{}).get('target_kpi','—')} | "
+        f"Source: {channel_kpi_data.get(ch,{}).get('data_source','—')}"
+        for ch,b in budget_split.items()
+    ]
+    gaps_note = ("\n\nDATA GAPS — industry averages used for: " + ", ".join([g.split(":")[0].replace("**","").strip() for g in data_gaps])) if data_gaps else ""
 
-    prompt = f"""Senior digital media planner. Generate a concise, structured media plan.
+    prompt = f"""You are a senior digital media planner with 15+ years of experience planning campaigns in Sri Lanka.
 
-CLIENT: {client_name} | BRAND: {brand_name}
+Generate a complete, professional media plan based on the brief and pre-calculated data below.
 
-BUDGET & KPIs (pre-calculated — use exactly):
+CLIENT: {client_name}
+BRAND: {brand_name}
+
+PRE-CALCULATED BUDGET SPLIT & KPIs — use these exact numbers, do not recalculate:
 {chr(10).join(split_lines)}{gaps_note}
 
-KEY BRIEF DETAILS:
+FULL PLANNING CONVERSATION:
 {conv_text}
 
-HISTORICAL BENCHMARKS:
-{data_summary[:800]}
+HISTORICAL PERFORMANCE DATA:
+{data_summary}
 
-OUTPUT FORMAT — keep each section tight and use tables where possible:
+Generate the media plan with these sections. Use markdown tables where appropriate:
 
 ## 1. EXECUTIVE SUMMARY
-2-3 sentences only.
+Strategic rationale (3-4 sentences) referencing the brief, objective, and historical performance.
 
-## 2. CHANNEL STRATEGY
-One paragraph explaining budget split rationale.
+## 2. BUDGET ALLOCATION RATIONALE
+Explain why each channel received its budget — reference audience sizes, historical efficiency, and objective fit.
 
-## 3. CHANNEL PLAN
-For each channel, use this exact table format:
+## 3. CHANNEL-BY-CHANNEL PLAN
+For each channel, show a table:
 | Metric | Value |
 |--------|-------|
-| Budget | LKR X |
-| KPI Type | X |
-| Buying Rate | X |
-| Target KPI | X |
-| Ad Formats | X |
-| Targeting | X |
-| Creative Assets | X |
-| Data Source | X |
+| Budget (LKR) | ... |
+| KPI Type | ... |
+| Buying Rate | ... |
+| Target KPI | ... |
+| Ad Formats | ... |
+| Targeting | ... |
+| Creative Assets | ... |
+| Data Source | ... |
+Then 2-3 sentences on tactics, bidding strategy and pacing.
 
-## 4. CREATIVE ASSET MATRIX
-| Asset Type | Platform | Placement | Objective | KPI Target |
-|------------|----------|-----------|-----------|------------|
+## 4. CREATIVE ASSET PLAN
+| Asset Type | Platform | Placement | Objective | KPI Target | Specs |
+|------------|----------|-----------|-----------|------------|-------|
 
-## 5. KPI SUMMARY
-| Channel | Budget (LKR) | KPI Type | Buying Rate | Target KPI |
-|---------|-------------|----------|-------------|------------|
+## 5. REACH & FREQUENCY PROJECTIONS
+Based on audience sizes and budgets — estimated reach % and avg frequency per platform.
 
-## 6. OPTIMISATION ROADMAP
-| Week | Actions |
-|------|---------|
+## 6. KPI SUMMARY TABLE
+| Channel | Budget (LKR) | KPI Type | Buying Rate | Target KPI | Data Source |
+|---------|-------------|----------|-------------|------------|-------------|
 
-## 7. RISK FLAGS
-Bullet points only.
+## 7. WEEKLY OPTIMISATION ROADMAP
+| Week | Focus | Key Actions |
+|------|-------|-------------|
 
-Be precise. Use LKR. Flag ⚠️ where industry averages used."""
+## 8. RISK FLAGS & MITIGATION
+Bullet points — risks from historical data and mitigation strategies.
 
-    msg = client.messages.create(model="claude-sonnet-4-6",max_tokens=3500,messages=[{"role":"user","content":prompt}])
+Use LKR throughout. Flag ⚠️ clearly where industry averages were used instead of historical data."""
+
+    msg = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=5000,
+        messages=[{"role":"user","content":prompt}]
+    )
     return msg.content[0].text
 
 def apply_plan_edits(edit_conversation, original_plan, client_name, brand_name, budget_split, channel_kpi_data):
