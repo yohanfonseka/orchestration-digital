@@ -93,6 +93,25 @@ st.markdown("""
   div[data-testid="stExpander"] { background:#fff !important; border:1px solid #e8eaf0 !important; border-radius:10px !important; }
   label { color:#4a5168 !important; font-size:0.85rem !important; font-weight:500 !important; }
   #MainMenu, footer, header { visibility:hidden; }
+
+  /* Force chat input to appear inline in the flow above action buttons */
+  [data-testid="stChatInput"] {
+    position: relative !important;
+    bottom: auto !important;
+    border-top: 1px solid #e8eaf0 !important;
+    background: #ffffff !important;
+    border-radius: 12px !important;
+    margin: 12px 0 !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important;
+  }
+  [data-testid="stChatInput"] textarea {
+    background: #ffffff !important;
+    color: #1a1d23 !important;
+    font-size: 0.9rem !important;
+  }
+  [data-testid="stChatInputSubmitButton"] svg {
+    fill: #1e3a5f !important;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -966,31 +985,6 @@ if nav=="📊  New Campaign Plan":
         brief_auto_complete="[BRIEF_COMPLETE]" in last_agent
         num_user_msgs=len([m for m in st.session_state["chat_messages"] if m["role"]=="user"])
 
-        # ── Message input box — sits right below the chat ───────────────────
-        with st.form("orchy_form", clear_on_submit=True):
-            user_input = st.text_area(
-                "Message Orchy",
-                placeholder="Type your answer here… (Ctrl+Enter or click Send)",
-                label_visibility="collapsed",
-                height=90,
-                key="orchy_input"
-            )
-            col_send, col_back = st.columns([3, 1])
-            with col_send:
-                submitted = st.form_submit_button("Send →", use_container_width=True)
-            with col_back:
-                go_back = st.form_submit_button("← Back", use_container_width=True)
-
-        if go_back:
-            st.session_state["step"] = 2; st.rerun()
-
-        if submitted and user_input.strip():
-            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
-            with st.spinner("Orchy is thinking…"):
-                reply = get_agent_response(st.session_state["chat_messages"], client_name, brand_name, data_summary)
-            st.session_state["chat_messages"].append({"role":"agent","content":reply})
-            st.rerun()
-
         # Generate button — shown after 3+ messages
         if num_user_msgs>=3:
             st.markdown("---")
@@ -1057,9 +1051,17 @@ if nav=="📊  New Campaign Plan":
                         st.rerun()
                     except Exception as e: st.error(f"Error: {e}")
             st.markdown('</div>',unsafe_allow_html=True)
-            st.markdown("---")
 
+        # st.chat_input — Enter sends, Shift+Enter new line, auto-scrolls natively
+        if user_input := st.chat_input("Message Orchy… (Enter to send, Shift+Enter for new line)"):
+            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
+            with st.spinner("Orchy is thinking…"):
+                reply=get_agent_response(st.session_state["chat_messages"],client_name,brand_name,data_summary)
+            st.session_state["chat_messages"].append({"role":"agent","content":reply})
+            st.rerun()
 
+        if st.button("← Back to Data", key="back_to_data"):
+            st.session_state["step"]=2; st.rerun()
 
     # STEP 4
     elif st.session_state["step"]==4:
@@ -1189,26 +1191,8 @@ elif nav=="📁  Saved Plans":
         edit_complete="[EDIT_COMPLETE]" in last_agent
         num_edit_msgs=len([m for m in st.session_state["edit_messages"] if m["role"]=="user"])
 
-        # ── Edit input box — sits right below the chat ──────────────────────
-        with st.form("edit_form", clear_on_submit=True):
-            edit_input = st.text_area(
-                "Edit instruction",
-                placeholder="Tell Orchy what to change… (click Send when ready)",
-                label_visibility="collapsed",
-                height=90,
-                key="edit_input"
-            )
-            col_esend, col_ecancel = st.columns([3, 1])
-            with col_esend:
-                edit_submitted = st.form_submit_button("Send →", use_container_width=True)
-            with col_ecancel:
-                edit_cancel = st.form_submit_button("← Cancel", use_container_width=True)
-
-        if edit_cancel:
-            st.session_state.update({"edit_mode":False,"edit_plan":{},"edit_messages":[]})
-            st.rerun()
-
-        if edit_submitted and edit_input.strip():
+        # Native chat input for edit mode
+        if edit_input := st.chat_input("Tell Orchy what to change… (Enter to send, Shift+Enter for new line)"):
             st.session_state["edit_messages"].append({"role":"user","content":edit_input.strip()})
             with st.spinner("Orchy is thinking…"):
                 reply=get_agent_response(st.session_state["edit_messages"],client_name,brand_name,"",mode="editing",existing_plan=original_plan)
