@@ -279,12 +279,18 @@ def calculate_budget_split(channels, total_budget, objective, audience_sizes, be
     obj_key = next((k for k in objective_weights if k.lower() in objective.lower()), "Brand Awareness")
     weights = objective_weights[obj_key]
     scores = {}
+    # Force numeric — audience_sizes and cpm may come back as strings from JSON extraction
+    total_budget = float(total_budget or 0)
     for ch in channels:
         wt = next((v for k,v in weights.items() if k.lower() in ch.lower()), 1.0)
-        aud = audience_sizes.get(ch, 500000)
+        aud_raw = audience_sizes.get(ch, 500000)
+        try: aud = int(float(str(aud_raw).replace(",","")))
+        except: aud = 500000
         aud_score = np.log10(max(aud,1000)) / np.log10(10_000_000)
         bench = benchmarks.get(ch, {})
-        cpm = bench.get("cpm") or INDUSTRY_AVERAGES.get(ch,{}).get("cpm",450)
+        cpm_raw = bench.get("cpm") or INDUSTRY_AVERAGES.get(ch,{}).get("cpm",450)
+        try: cpm = float(str(cpm_raw).replace(",",""))
+        except: cpm = 450
         efficiency_score = min(1000/max(cpm,50), 2.0)
         scores[ch] = wt * aud_score * efficiency_score
     total_score = sum(scores.values()) or 1
@@ -292,10 +298,12 @@ def calculate_budget_split(channels, total_budget, objective, audience_sizes, be
     min_budget = total_budget * 0.05
     for ch in split:
         if split[ch] < min_budget: split[ch] = min_budget
-    total_alloc = sum(split.values())
+    total_alloc = sum(split.values()) or 1
     return {ch: round(v/total_alloc*total_budget,0) for ch,v in split.items()}
 
 def calculate_channel_kpis(channel, budget_lkr, benchmarks, objective):
+    try: budget_lkr = float(str(budget_lkr).replace(",",""))
+    except: budget_lkr = 0
     bench = benchmarks.get(channel, {})
     industry = INDUSTRY_AVERAGES.get(channel, {})
     objective_kpi_map = {
@@ -328,7 +336,9 @@ def calculate_channel_kpis(channel, budget_lkr, benchmarks, objective):
             is_industry_avg = True
             data_source = "⚠️ Industry Average (LK)"
 
-    buying_rate_lkr = round(historical_rate, 2)
+    try: buying_rate_lkr = round(float(str(historical_rate).replace(",","")), 2)
+    except: buying_rate_lkr = 450.0
+    if buying_rate_lkr <= 0: buying_rate_lkr = 450.0
     if kpi_type=="CPM":
         target=int(budget_lkr/buying_rate_lkr*1000); target_str=f"{target:,} Impressions"; rate_str=f"LKR {buying_rate_lkr:,.0f} CPM"
     elif kpi_type=="CPC":
@@ -1025,7 +1035,8 @@ if nav=="📊  New Campaign Plan":
                         benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
                         channels=brief_summary.get("channels",[])
                         audience_sizes=brief_summary.get("audience_sizes",{})
-                        total_budget=float(brief_summary.get("total_budget",0))
+                        try: total_budget=float(str(brief_summary.get("total_budget",0)).replace(",",""))
+                        except: total_budget=0
                         objective=brief_summary.get("objective","Brand Awareness")
                         budget_split=calculate_budget_split(channels,total_budget,objective,audience_sizes,benchmarks)
                         st.session_state["budget_split"]=budget_split
