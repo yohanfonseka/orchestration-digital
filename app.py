@@ -71,8 +71,8 @@ st.markdown("""
   .msg-user { display:flex; gap:12px; margin-bottom:16px; align-items:flex-start; flex-direction:row-reverse; }
   .avatar-agent { width:32px; height:32px; background:linear-gradient(135deg,#1e3a5f,#2d5a9b); border-radius:50%; display:flex; align-items:center; justify-content:center; color:#fff; font-size:0.75rem; font-weight:700; flex-shrink:0; }
   .avatar-user { width:32px; height:32px; background:linear-gradient(135deg,#1a8a6e,#22b894); border-radius:50%; display:flex; align-items:center; justify-content:center; color:#fff; font-size:0.75rem; font-weight:700; flex-shrink:0; }
-  .bubble-agent { background:#f0f4fa; border-radius:0 12px 12px 12px; padding:12px 16px; max-width:80%; font-size:0.88rem; line-height:1.6; color:#1a1d23; }
-  .bubble-user { background:linear-gradient(135deg,#1e3a5f,#2d5a9b); border-radius:12px 0 12px 12px; padding:12px 16px; max-width:80%; font-size:0.88rem; line-height:1.6; color:#fff; }
+  .bubble-agent { background:#1e3a5f !important; border-radius:0 12px 12px 12px; padding:12px 16px; max-width:80%; font-size:0.88rem; line-height:1.6; color:#ffffff !important; border:1px solid #2d5a9b; }
+  .bubble-user { background:linear-gradient(135deg,#1a8a6e,#22b894); border-radius:12px 0 12px 12px; padding:12px 16px; max-width:80%; font-size:0.88rem; line-height:1.6; color:#fff !important; }
   #chat-bottom { height:1px; }
 
   /* ── Buttons ── */
