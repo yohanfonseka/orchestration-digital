@@ -265,7 +265,14 @@ INDUSTRY_AVERAGES = {
     "Programmatic":  {"cpm":250,"cpc":55,"cpv":None,"cpa":1400,"ctr":0.25,"roas":None},
 }
 
-def calculate_budget_split(channels, total_budget, objective, audience_sizes, benchmarks):
+def calculate_budget_split(channels, total_budget, objective, audience_sizes, benchmarks, channel_kpis=None, channel_dates=None):
+    """
+    Optimised budget split:
+    1. Calculate cost to reach 80% of targetable audience per channel
+    2. Cap each channel at that 80% reach budget
+    3. Redistribute surplus to most efficient channels by CPR
+    4. Score remaining by objective fit + efficiency
+    """
     objective_weights = {
         "Brand Awareness":         {"Facebook":1.3,"Instagram":1.2,"YouTube":1.4,"Google Display":1.0,"TikTok":1.1,"Google Search":0.6,"LinkedIn":0.8,"Programmatic":0.9},
         "Reach & Frequency":       {"Facebook":1.4,"Instagram":1.3,"YouTube":1.3,"Google Display":0.9,"TikTok":1.0,"Google Search":0.5,"LinkedIn":0.7,"Programmatic":0.8},
@@ -279,27 +286,82 @@ def calculate_budget_split(channels, total_budget, objective, audience_sizes, be
     obj_key = next((k for k in objective_weights if k.lower() in objective.lower()), "Brand Awareness")
     weights = objective_weights[obj_key]
     scores = {}
-    # Force numeric — audience_sizes and cpm may come back as strings from JSON extraction
     total_budget = float(total_budget or 0)
+    if not channels: return {}
+    if channel_kpis is None: channel_kpis = {}
+
+    REACH_CAP = 0.80      # 80% max reach rule
+    AVG_FREQUENCY = 3.0   # assumed average frequency for reach calculation
+
+    channel_data = {}
     for ch in channels:
-        wt = next((v for k,v in weights.items() if k.lower() in ch.lower()), 1.0)
         aud_raw = audience_sizes.get(ch, 500000)
         try: aud = int(float(str(aud_raw).replace(",","")))
         except: aud = 500000
-        aud_score = np.log10(max(aud,1000)) / np.log10(10_000_000)
+
         bench = benchmarks.get(ch, {})
         cpm_raw = bench.get("cpm") or INDUSTRY_AVERAGES.get(ch,{}).get("cpm",450)
         try: cpm = float(str(cpm_raw).replace(",",""))
         except: cpm = 450
-        efficiency_score = min(1000/max(cpm,50), 2.0)
-        scores[ch] = wt * aud_score * efficiency_score
-    total_score = sum(scores.values()) or 1
-    split = {ch: round((scores[ch]/total_score)*total_budget,0) for ch in channels}
+
+        # Determine CPR based on KPI type
+        kpi_type = channel_kpis.get(ch, "CPM")
+        if "cpc" in kpi_type.lower():
+            cpr_raw = bench.get("cpc") or INDUSTRY_AVERAGES.get(ch,{}).get("cpc",95)
+        elif "cpv" in kpi_type.lower():
+            cpr_raw = bench.get("cpv") or INDUSTRY_AVERAGES.get(ch,{}).get("cpv",10)
+        elif "cpa" in kpi_type.lower() or "cpl" in kpi_type.lower():
+            cpr_raw = bench.get("cpa") or INDUSTRY_AVERAGES.get(ch,{}).get("cpa",950)
+        else:
+            cpr_raw = cpm  # CPM is the cost per result for awareness
+
+        try: cpr = float(str(cpr_raw).replace(",",""))
+        except: cpr = 450
+
+        # Budget needed to reach 80% of targetable audience
+        reach_80pct = aud * REACH_CAP
+        impressions_needed = reach_80pct * AVG_FREQUENCY
+        budget_for_80pct = (impressions_needed / 1000) * cpm
+
+        # Objective weight
+        wt = next((v for k,v in weights.items() if k.lower() in ch.lower()), 1.0)
+
+        channel_data[ch] = {
+            "audience": aud,
+            "cpm": cpm,
+            "cpr": cpr,
+            "efficiency": 1.0 / max(cpr, 0.01),  # lower CPR = higher efficiency
+            "budget_80pct": budget_for_80pct,
+            "weight": wt,
+        }
+
+    # Step 1: Initial allocation capped at 80% reach budget per channel
+    total_80pct = sum(d["budget_80pct"] for d in channel_data.values())
+
+    if total_80pct <= total_budget:
+        # Budget exceeds all 80% reach costs — cap each and redistribute surplus
+        split = {ch: min(d["budget_80pct"], total_budget) for ch,d in channel_data.items()}
+        surplus = total_budget - sum(split.values())
+        # Distribute surplus to most efficient channels (raise their reach % proportionally)
+        if surplus > 0:
+            efficiency_sum = sum(d["efficiency"] * d["weight"] for d in channel_data.values())
+            for ch in channels:
+                d = channel_data[ch]
+                split[ch] += round(surplus * (d["efficiency"] * d["weight"]) / max(efficiency_sum, 0.001), 0)
+    else:
+        # Not enough budget to reach 80% everywhere — prioritise by CPR efficiency
+        scores = {ch: d["efficiency"] * d["weight"] for ch,d in channel_data.items()}
+        total_score = sum(scores.values()) or 1
+        split = {ch: round((scores[ch]/total_score)*total_budget, 0) for ch in channels}
+
+    # Enforce minimum 5% per channel
     min_budget = total_budget * 0.05
     for ch in split:
         if split[ch] < min_budget: split[ch] = min_budget
+
+    # Re-normalise to total budget
     total_alloc = sum(split.values()) or 1
-    return {ch: round(v/total_alloc*total_budget,0) for ch,v in split.items()}
+    return {ch: round(v/total_alloc*total_budget, 0) for ch,v in split.items()}
 
 def calculate_channel_kpis(channel, budget_lkr, benchmarks, objective):
     try: budget_lkr = float(str(budget_lkr).replace(",",""))
@@ -520,10 +582,35 @@ JSON only, no markdown."""
         return {"campaign_name":"Campaign","objective":"","total_budget":0,"start_date":str(date.today()),
                 "end_date":str(date.today()),"audience":"","channels":[],"audience_sizes":{},"assets":"","market":"Sri Lanka"}
 
-def generate_media_plan(conversation, client_name, brand_name, data_summary, budget_split, channel_kpi_data, data_gaps):
-    """Generate full media plan from conversation + pre-calculated budget/KPI data."""
+def generate_media_plan(brief, client_name, brand_name, data_summary, budget_split, channel_kpi_data, data_gaps):
+    """Generate full media plan from structured brief form data + pre-calculated budget/KPI data."""
     client = get_anthropic_client()
-    conv_text = "\n".join([f"{'PLANNER' if m['role']=='user' else 'AGENT'}: {m['content']}" for m in conversation])
+    # Build structured brief text from form data
+    conv_text = f"""
+CAMPAIGN NAME: {brief.get("campaign_name","")}
+OBJECTIVE: {brief.get("objective","")}
+TOTAL BUDGET: LKR {brief.get("total_budget",0):,.0f}
+FLIGHT DATES: {brief.get("start_date","")} to {brief.get("end_date","")}
+MARKET: {brief.get("market","Sri Lanka")}
+BUDGET TYPE: {brief.get("budget_type","Total campaign budget")}
+
+TARGET AUDIENCE:
+- Age: {brief.get("age_min",18)}–{brief.get("age_max",65)}
+- Gender: {brief.get("gender","All")}
+- Locations: {brief.get("locations","")}
+- Interests & Behaviours: {brief.get("interests","")}
+- Custom Audiences: {brief.get("custom_audiences","")}
+- Lookalike Audiences: {brief.get("lookalike","")}
+
+CHANNELS & AUDIENCE SIZES:
+{chr(10).join([f"  {ch}: targetable audience = {brief.get('audience_sizes',{}).get(ch,'unknown'):,} | KPI = {brief.get('channel_kpis',{}).get(ch,'CPM')} | Dates: {brief.get('channel_dates',{}).get(ch,'same as campaign')}" for ch in brief.get("channels",[])])}
+
+CREATIVE ASSETS PER CHANNEL:
+{chr(10).join([f"  {ch}: {', '.join(brief.get('creative_assets',{}).get(ch,[]))}" for ch in brief.get("channels",[])])}
+
+ADDITIONAL PLANNING INSTRUCTIONS:
+{brief.get("planning_instructions","")}
+"""
     split_lines = [
         f"  {ch}: LKR {b:,.0f} | KPI: {channel_kpi_data.get(ch,{}).get('kpi_type','CPM')} | "
         f"Buying Rate: {channel_kpi_data.get(ch,{}).get('buying_rate','—')} | "
@@ -535,16 +622,26 @@ def generate_media_plan(conversation, client_name, brand_name, data_summary, bud
 
     prompt = f"""You are a senior digital media planner with 15+ years of experience planning campaigns in Sri Lanka.
 
-Generate a complete, professional media plan based on the brief and pre-calculated data below.
+Generate a complete, professional media plan based on the campaign brief and pre-calculated data below.
 
 CLIENT: {client_name}
 BRAND: {brand_name}
 
+CAMPAIGN BRIEF:
+{conv_text}
+
 PRE-CALCULATED BUDGET SPLIT & KPIs — use these exact numbers, do not recalculate:
 {chr(10).join(split_lines)}{gaps_note}
 
-FULL PLANNING CONVERSATION:
-{conv_text}
+PLANNING RULES (follow strictly):
+1. Budget is optimised by minimum cost per result — channels with lower CPR get higher budget priority
+2. 80% reach cap — never allocate budget beyond what is needed to reach 80% of the targetable audience on any channel (diminishing returns beyond this point)
+3. If a channel hits 80% reach cap, redistribute surplus budget to the next most efficient channel
+4. Prioritise channels in order: lowest CPR → largest reachable audience → objective fit
+5. For awareness campaigns: prioritise lowest CPM channels first
+6. For conversion campaigns: prioritise lowest CPA/CPL channels first
+7. All buying rates and KPI targets are pre-calculated from historical data — use them exactly
+8. Flag clearly where industry averages were used (no historical data)
 
 HISTORICAL PERFORMANCE DATA:
 {data_summary}
@@ -832,7 +929,7 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════════════════
 if nav=="📊  New Campaign Plan":
     sb=get_supabase()
-    steps=["1 · Client & Brand","2 · Historical Data","3 · Plan with Orchy","4 · Media Plan"]
+    steps=["1 · Client & Brand","2 · Historical Data","3 · Campaign Brief","4 · Media Plan"]
     cols=st.columns(4)
     for i,(col,label) in enumerate(zip(cols,steps),1):
         active=st.session_state["step"]==i; done=st.session_state["step"]>i
@@ -986,117 +1083,248 @@ if nav=="📊  New Campaign Plan":
                 else: st.session_state["step"]=3; st.rerun()
             st.markdown('</div>',unsafe_allow_html=True)
 
-    # STEP 3 — CHAT
+    # STEP 3 — CAMPAIGN BRIEF FORM
     elif st.session_state["step"]==3:
         client_name=st.session_state["selected_client"]["client_name"]
         brand_name=st.session_state["selected_brand"]["brand_name"]
-        data_summary=summarise_dataframe(st.session_state["combined_df"])
+        benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
 
-        st.markdown(f'<div class="section-header">Plan with Orchy — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
+        st.markdown(f'<div class="section-header">Campaign Brief — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
 
-        # Initialise with Orchy greeting
-        if not st.session_state["chat_messages"]:
-            with st.spinner("Orchy is getting ready…"):
-                first=get_agent_response(
-                    [{"role":"user","content":"Hello, I need to plan a new campaign."}],
-                    client_name,brand_name,data_summary
-                )
-            st.session_state["chat_messages"]=[
-                {"role":"user","content":"Hello, I need to plan a new campaign."},
-                {"role":"agent","content":first}
-            ]
-            st.rerun()
+        ALL_CHANNELS=["Facebook","Instagram","YouTube","Google Search","Google Display","TikTok","LinkedIn","Programmatic Display"]
+        OBJECTIVES=["Brand Awareness","Reach & Frequency","Video Views","Website Traffic","Lead Generation","E-commerce / Conversions","App Installs","Engagement"]
+        ASSET_TYPES=["Static Images","Video — 6s","Video — 15s","Video — 30s","Video — 60s","Carousel","Stories / Reels","UGC Content","Influencer Content"]
 
-        # Render all messages using native st.chat_message
-        for msg in st.session_state["chat_messages"]:
-            role_display = "assistant" if msg["role"]=="agent" else "user"
-            avatar = "🤖" if msg["role"]=="agent" else "🧑‍💼"
-            with st.chat_message(role_display, avatar=avatar):
-                st.markdown(msg["content"].replace("[BRIEF_COMPLETE]","").strip())
+        prev=st.session_state.get("brief_form",{})
 
-        last_agent=next((m["content"] for m in reversed(st.session_state["chat_messages"]) if m["role"]=="agent"),"")
-        brief_auto_complete="[BRIEF_COMPLETE]" in last_agent
-        num_user_msgs=len([m for m in st.session_state["chat_messages"] if m["role"]=="user"])
+        # ── Section 1: Campaign Basics ────────────────────────────────────────
+        st.markdown('<div class="section-header">1 · Campaign Basics</div>',unsafe_allow_html=True)
+        col1,col2,col3=st.columns(3)
+        with col1:
+            campaign_name=st.text_input("Campaign Name",value=prev.get("campaign_name",""),placeholder="e.g. Q3 2025 Brand Awareness")
+        with col2:
+            objective=st.selectbox("Campaign Objective",OBJECTIVES,index=OBJECTIVES.index(prev.get("objective","Brand Awareness")) if prev.get("objective") in OBJECTIVES else 0)
+        with col3:
+            market=st.text_input("Market / Region",value=prev.get("market","Sri Lanka"))
 
-        # Generate button — shown after 3+ messages
-        if num_user_msgs>=3:
-            st.markdown("---")
-            if brief_auto_complete:
-                st.success("✅ Orchy has all the information needed. Ready to generate your media plan!")
-            else:
-                st.info("💡 Ready to generate? Click below — or keep chatting to add more detail.")
+        col4,col5,col6=st.columns(3)
+        with col4:
+            total_budget=st.number_input("Total Budget (LKR)",min_value=0,value=int(prev.get("total_budget",1000000)),step=50000,format="%d")
+            st.caption(f"≈ USD {total_budget/320:,.0f}")
+        with col5:
+            start_date=st.date_input("Start Date",value=prev.get("start_date",date.today()))
+        with col6:
+            end_date=st.date_input("End Date",value=prev.get("end_date",date.today()))
+        budget_type=st.radio("Budget Type",["Total campaign budget","Monthly budget"],horizontal=True,index=0 if prev.get("budget_type","Total")=="Total" else 1)
+
+        # ── Section 2: Target Audience ────────────────────────────────────────
+        st.markdown('<div class="section-header">2 · Target Audience</div>',unsafe_allow_html=True)
+        col7,col8,col9=st.columns(3)
+        with col7:
+            age_col1,age_col2=st.columns(2)
+            age_min=age_col1.number_input("Age Min",min_value=13,max_value=65,value=int(prev.get("age_min",18)))
+            age_max=age_col2.number_input("Age Max",min_value=13,max_value=65,value=int(prev.get("age_max",45)))
+        with col8:
+            gender=st.selectbox("Gender",["All","Male","Female"],index=["All","Male","Female"].index(prev.get("gender","All")))
+        with col9:
+            locations=st.text_input("Locations",value=prev.get("locations","Sri Lanka — Island-wide"),placeholder="e.g. Colombo, Kandy, Galle")
+
+        col10,col11=st.columns(2)
+        with col10:
+            interests=st.text_area("Interests & Behaviours",value=prev.get("interests",""),placeholder="e.g. Finance, Tech, Online Shopping",height=80)
+        with col11:
+            custom_audiences=st.text_area("Custom Audiences",value=prev.get("custom_audiences",""),placeholder="e.g. Website visitors, CRM list upload",height=40)
+            lookalike=st.text_input("Lookalike Audiences",value=prev.get("lookalike",""),placeholder="e.g. 1% lookalike of past purchasers")
+
+        # ── Section 3: Channel Selection ──────────────────────────────────────
+        st.markdown('<div class="section-header">3 · Channel Selection</div>',unsafe_allow_html=True)
+        st.caption("Select channels to include. For each selected channel, fill in the audience size from the platform estimator and the primary KPI.")
+
+        prev_channels=prev.get("channels",[])
+        selected_channels=[]
+        channel_audience_sizes=prev.get("audience_sizes",{})
+        channel_kpis_form=prev.get("channel_kpis",{})
+        channel_dates_form=prev.get("channel_dates",{})
+        channel_instructions=prev.get("channel_instructions",{})
+
+        KPI_OPTIONS=["CPM (Awareness/Reach)","CPC (Traffic/Clicks)","CPV (Video Views)","CPL (Leads)","CPA (Conversions)","ROAS (E-commerce)"]
+
+        for ch in ALL_CHANNELS:
+            ch_selected=st.checkbox(f"**{ch}**",value=ch in prev_channels,key=f"ch_{ch}")
+            if ch_selected:
+                selected_channels.append(ch)
+                with st.container():
+                    bench=benchmarks.get(ch,{})
+                    industry=INDUSTRY_AVERAGES.get(ch,{})
+                    cpm_hint=bench.get("cpm") or industry.get("cpm","—")
+                    cpc_hint=bench.get("cpc") or industry.get("cpc","—")
+                    hint_txt=f"Historical: CPM={cpm_hint}, CPC={cpc_hint}" if cpm_hint!="—" else "No historical data — industry averages will be used"
+                    st.caption(f"📊 {hint_txt}")
+                    cc1,cc2,cc3,cc4=st.columns(4)
+                    with cc1:
+                        aud_val=channel_audience_sizes.get(ch,0)
+                        channel_audience_sizes[ch]=st.number_input(
+                            f"Targetable Audience",min_value=0,value=int(aud_val),
+                            step=1000,format="%d",key=f"aud_{ch}",
+                            help="Get this from Meta Audience Insights / Google Reach Planner / TikTok Audience Estimator"
+                        )
+                    with cc2:
+                        prev_kpi=channel_kpis_form.get(ch,"CPM (Awareness/Reach)")
+                        kpi_idx=KPI_OPTIONS.index(prev_kpi) if prev_kpi in KPI_OPTIONS else 0
+                        channel_kpis_form[ch]=st.selectbox(f"Primary KPI",KPI_OPTIONS,index=kpi_idx,key=f"kpi_{ch}")
+                    with cc3:
+                        channel_dates_form[ch]=st.text_input(f"Flight Dates",value=channel_dates_form.get(ch,"Same as campaign"),key=f"dates_{ch}")
+                    with cc4:
+                        channel_instructions[ch]=st.text_input(f"Special Instructions",value=channel_instructions.get(ch,""),key=f"inst_{ch}",placeholder="e.g. Mobile only")
+                    st.markdown("<div style='height:4px'></div>",unsafe_allow_html=True)
+
+        # ── Section 4: Creative Assets ─────────────────────────────────────────
+        if selected_channels:
+            st.markdown('<div class="section-header">4 · Creative Assets</div>',unsafe_allow_html=True)
+            st.caption("Select available creative assets per channel. Optionally specify budget split by asset type.")
+            prev_assets=prev.get("creative_assets",{})
+            prev_asset_budgets=prev.get("asset_budgets",{})
+            creative_assets={}
+            asset_budgets={}
+            split_by_asset=st.checkbox("Split budget by creative asset type",value=prev.get("split_by_asset",False))
+
+            for ch in selected_channels:
+                st.markdown(f"**{ch}**")
+                cols=st.columns(len(ASSET_TYPES))
+                selected_assets=[]
+                for i,asset in enumerate(ASSET_TYPES):
+                    if cols[i].checkbox(asset.replace(" — "," "),value=asset in prev_assets.get(ch,[]),key=f"asset_{ch}_{i}",label_visibility="visible"):
+                        selected_assets.append(asset)
+                creative_assets[ch]=selected_assets
+
+                if split_by_asset and selected_assets:
+                    st.caption(f"Budget split for {ch} (LKR) — must add up to channel total:")
+                    ab_cols=st.columns(len(selected_assets))
+                    ch_budgets={}
+                    for i,asset in enumerate(selected_assets):
+                        ch_budgets[asset]=ab_cols[i].number_input(
+                            asset,min_value=0,value=int(prev_asset_budgets.get(ch,{}).get(asset,0)),
+                            step=10000,format="%d",key=f"ab_{ch}_{i}",label_visibility="visible"
+                        )
+                    asset_budgets[ch]=ch_budgets
+                st.markdown("<div style='height:4px'></div>",unsafe_allow_html=True)
+
+        # ── Section 5: Planning Instructions ──────────────────────────────────
+        st.markdown('<div class="section-header">5 · Additional Planning Instructions</div>',unsafe_allow_html=True)
+        planning_instructions=st.text_area(
+            "Instructions for the AI planner",
+            value=prev.get("planning_instructions",""),
+            placeholder="e.g. Prioritise reach over frequency. Avoid competitor brand keywords. Focus on mobile placements. Weight Facebook higher than Instagram.",
+            height=100,
+            label_visibility="collapsed"
+        )
+
+        # ── Generate ──────────────────────────────────────────────────────────
+        st.markdown("---")
+        col_back,col_gen=st.columns([1,3])
+        with col_back:
+            if st.button("← Back",use_container_width=True):
+                st.session_state["step"]=2; st.rerun()
+        with col_gen:
             st.markdown('<div class="green-btn">',unsafe_allow_html=True)
             if st.button("🚀 Generate Media Plan",use_container_width=True):
-                with st.spinner("🤖 Calculating budget split, buying rates and KPI targets…"):
-                    try:
-                        brief_summary=extract_brief_from_conversation(st.session_state["chat_messages"])
-                        st.session_state["brief_summary"]=brief_summary
-                        # Use pre-computed benchmarks from step 2 if available — saves recomputing
-                        benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
-                        channels=brief_summary.get("channels",[])
-                        audience_sizes=brief_summary.get("audience_sizes",{})
-                        try: total_budget=float(str(brief_summary.get("total_budget",0)).replace(",",""))
-                        except: total_budget=0
-                        objective=brief_summary.get("objective","Brand Awareness")
-                        budget_split=calculate_budget_split(channels,total_budget,objective,audience_sizes,benchmarks)
-                        st.session_state["budget_split"]=budget_split
-                        channel_placements=brief_summary.get("channel_placements",{})
-                        channel_kpi_data={}
-                        for ch,b in budget_split.items():
-                            kpi=calculate_channel_kpis(ch,b,benchmarks,objective)
-                            # Attach per-creative placements if specified
-                            if ch in channel_placements and channel_placements[ch]:
-                                enriched_placements=[]
-                                for pl in channel_placements[ch]:
-                                    pl_budget=pl.get("budget",0) or round(b/len(channel_placements[ch]),0)
-                                    pl_kpi=calculate_channel_kpis(ch,pl_budget,benchmarks,pl.get("objective",objective))
-                                    enriched_placements.append({
-                                        "placement": pl.get("placement",""),
-                                        "kpi_type":  pl.get("kpi_type",pl_kpi["kpi_type"]),
-                                        "buying_rate": pl_kpi["buying_rate"],
-                                        "target_kpi":  pl_kpi["target_kpi"],
-                                        "assets":    pl.get("assets",""),
-                                        "objective": pl.get("objective",objective),
-                                        "budget":    pl_budget,
-                                    })
-                                kpi["placements"]=enriched_placements
-                            channel_kpi_data[ch]=kpi
-                        st.session_state["channel_kpi_data"]=channel_kpi_data
-                        data_gaps=get_data_gaps(channels,benchmarks)
-                        plan_text=generate_media_plan(st.session_state["chat_messages"],client_name,brand_name,data_summary,budget_split,channel_kpi_data,data_gaps)
-                        st.session_state["generated_plan"]=plan_text
-                        # Auto-save to library immediately
-                        pv_auto=get_plan_version(sb,brief_summary.get("campaign_name",""),st.session_state["selected_brand"]["id"])
-                        save_plan(sb,{"brand_id":st.session_state["selected_brand"]["id"],
-                            "client_name":client_name,"brand_name":brand_name,
-                            "campaign_name":brief_summary.get("campaign_name",""),
-                            "objective":brief_summary.get("objective",""),
-                            "total_budget":float(brief_summary.get("total_budget",0)),
-                            "start_date":brief_summary.get("start_date",""),
-                            "end_date":brief_summary.get("end_date",""),
-                            "channels":json.dumps(channels),
-                            "market":brief_summary.get("market","Sri Lanka"),
-                            "kpi_focus":"","plan_text":plan_text,"plan_version":pv_auto,
-                            "budget_split":json.dumps(budget_split),
-                            "channel_kpi_data":json.dumps(channel_kpi_data),
-                            "planning_conversation":json.dumps(st.session_state.get("chat_messages",[])),
-                            "created_at":datetime.utcnow().isoformat()})
-                        st.session_state["auto_saved_version"]=pv_auto
-                        st.session_state["step"]=4
-                        st.rerun()
-                    except Exception as e: st.error(f"Error: {e}")
+                # Validate
+                if not campaign_name:
+                    st.error("Please enter a Campaign Name.")
+                elif end_date<=start_date:
+                    st.error("End date must be after start date.")
+                elif not selected_channels:
+                    st.error("Please select at least one channel.")
+                elif any(channel_audience_sizes.get(ch,0)==0 for ch in selected_channels):
+                    st.warning("⚠️ Some channels have no audience size entered — budget optimisation will use estimates. Continue anyway?")
+                else:
+                    # Build brief dict
+                    brief={
+                        "campaign_name":campaign_name,
+                        "objective":objective,
+                        "total_budget":total_budget,
+                        "start_date":str(start_date),
+                        "end_date":str(end_date),
+                        "market":market,
+                        "budget_type":budget_type,
+                        "age_min":age_min,
+                        "age_max":age_max,
+                        "gender":gender,
+                        "locations":locations,
+                        "interests":interests,
+                        "custom_audiences":custom_audiences,
+                        "lookalike":lookalike,
+                        "channels":selected_channels,
+                        "audience_sizes":{ch:int(v) for ch,v in channel_audience_sizes.items() if ch in selected_channels},
+                        "channel_kpis":{ch:v for ch,v in channel_kpis_form.items() if ch in selected_channels},
+                        "channel_dates":{ch:v for ch,v in channel_dates_form.items() if ch in selected_channels},
+                        "channel_instructions":{ch:v for ch,v in channel_instructions.items() if ch in selected_channels},
+                        "creative_assets":{ch:v for ch,v in creative_assets.items() if ch in selected_channels},
+                        "asset_budgets":asset_budgets if split_by_asset else {},
+                        "split_by_asset":split_by_asset,
+                        "planning_instructions":planning_instructions,
+                    }
+                    st.session_state["brief_form"]=brief
+                    st.session_state["brief_summary"]=brief
+
+                    with st.spinner("🤖 Optimising budget split and generating your media plan…"):
+                        try:
+                            data_summary=summarise_dataframe(st.session_state["combined_df"])
+                            # Extract clean KPI type strings
+                            ch_kpi_types={ch:v.split(" ")[0] for ch,v in channel_kpis_form.items() if ch in selected_channels}
+                            budget_split=calculate_budget_split(
+                                selected_channels,total_budget,objective,
+                                {ch:int(channel_audience_sizes.get(ch,500000)) for ch in selected_channels},
+                                benchmarks,ch_kpi_types
+                            )
+                            st.session_state["budget_split"]=budget_split
+
+                            # Per-asset budget placements
+                            channel_kpi_data={}
+                            for ch,b in budget_split.items():
+                                kpi=calculate_channel_kpis(ch,b,benchmarks,objective)
+                                # Attach per-asset placements if split by asset
+                                if split_by_asset and ch in asset_budgets and asset_budgets[ch]:
+                                    enriched=[]
+                                    for asset,ab in asset_budgets[ch].items():
+                                        if ab>0:
+                                            pl_kpi=calculate_channel_kpis(ch,ab,benchmarks,objective)
+                                            enriched.append({
+                                                "placement":asset,"budget":ab,
+                                                "kpi_type":kpi["kpi_type"],
+                                                "buying_rate":pl_kpi["buying_rate"],
+                                                "target_kpi":pl_kpi["target_kpi"],
+                                                "assets":asset,"objective":objective,
+                                            })
+                                    if enriched: kpi["placements"]=enriched
+                                channel_kpi_data[ch]=kpi
+                            st.session_state["channel_kpi_data"]=channel_kpi_data
+
+                            data_gaps=get_data_gaps(selected_channels,benchmarks)
+                            plan_text=generate_media_plan(brief,client_name,brand_name,data_summary,budget_split,channel_kpi_data,data_gaps)
+                            st.session_state["generated_plan"]=plan_text
+
+                            pv_auto=get_plan_version(sb,campaign_name,st.session_state["selected_brand"]["id"])
+                            save_plan(sb,{
+                                "brand_id":st.session_state["selected_brand"]["id"],
+                                "client_name":client_name,"brand_name":brand_name,
+                                "campaign_name":campaign_name,"objective":objective,
+                                "total_budget":float(total_budget),
+                                "start_date":str(start_date),"end_date":str(end_date),
+                                "channels":json.dumps(selected_channels),
+                                "market":market,"kpi_focus":"",
+                                "plan_text":plan_text,"plan_version":pv_auto,
+                                "budget_split":json.dumps(budget_split),
+                                "channel_kpi_data":json.dumps(channel_kpi_data),
+                                "planning_conversation":json.dumps(brief),
+                                "created_at":datetime.utcnow().isoformat()
+                            })
+                            st.session_state["auto_saved_version"]=pv_auto
+                            st.session_state["step"]=4
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error generating plan: {e}")
             st.markdown('</div>',unsafe_allow_html=True)
-
-        # st.chat_input — Enter sends, Shift+Enter new line, auto-scrolls natively
-        if user_input := st.chat_input("Message Orchy… (Enter to send, Shift+Enter for new line)"):
-            st.session_state["chat_messages"].append({"role":"user","content":user_input.strip()})
-            with st.spinner("Orchy is thinking…"):
-                reply=get_agent_response(st.session_state["chat_messages"],client_name,brand_name,data_summary)
-            st.session_state["chat_messages"].append({"role":"agent","content":reply})
-            st.rerun()
-
-        if st.button("← Back to Data", key="back_to_data"):
-            st.session_state["step"]=2; st.rerun()
 
     # STEP 4
     elif st.session_state["step"]==4:
