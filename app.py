@@ -1366,6 +1366,28 @@ if nav=="📊  New Campaign Plan":
 
         if budget_split:
             st.markdown('<div class="section-header">Budget Split & KPI Targets</div>',unsafe_allow_html=True)
+
+            # Show channel ranking by CPR if available
+            ranking=st.session_state.get("budget_ranking",[])
+            if ranking:
+                st.caption("📊 Channels ranked by Cost Per Result (lowest CPR = highest priority = more budget)")
+                rank_rows=[]
+                for i,r in enumerate(ranking,1):
+                    cap_note=""
+                    if r["allocated"]>=r["budget_80pct"]*0.99:
+                        cap_note="🔒 80% reach cap"
+                    rank_rows.append({
+                        "Rank":f"#{i}",
+                        "Channel":r["channel"],
+                        "CPR (LKR)":f"LKR {r['cpr']:,.2f}",
+                        "Targetable Audience":f"{r['audience']:,}",
+                        "Budget for 80% Reach":f"LKR {r['budget_80pct']:,.0f}",
+                        "Allocated Budget":f"LKR {r['allocated']:,.0f}",
+                        "Note":cap_note,
+                    })
+                st.dataframe(pd.DataFrame(rank_rows),use_container_width=True,hide_index=True)
+                st.markdown("<br>",unsafe_allow_html=True)
+
             rows=[]
             for ch,budget in budget_split.items():
                 kpi=channel_kpi_data.get(ch,{})
