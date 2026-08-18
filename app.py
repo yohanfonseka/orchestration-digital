@@ -1089,6 +1089,8 @@ if nav=="📊  New Campaign Plan":
         brand_name=st.session_state["selected_brand"]["brand_name"]
         benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
 
+        # Scroll to top of page when step loads
+        st.markdown("<script>window.scrollTo(0,0);</script>", unsafe_allow_html=True)
         st.markdown(f'<div class="section-header">Campaign Brief — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
 
         ALL_CHANNELS=["Facebook","Instagram","YouTube","Google Search","Google Display","TikTok","LinkedIn","Programmatic Display"]
@@ -1110,11 +1112,13 @@ if nav=="📊  New Campaign Plan":
         col4,col5,col6=st.columns(3)
         with col4:
             total_budget=st.number_input("Total Budget (LKR)",min_value=0,value=int(prev.get("total_budget",1000000)),step=50000,format="%d")
-            st.caption(f"≈ USD {total_budget/320:,.0f}")
+            st.caption(f"💰 LKR {total_budget:,.0f}  ≈  USD {total_budget/320:,.0f}")
         with col5:
             start_date=st.date_input("Start Date",value=prev.get("start_date",date.today()))
         with col6:
-            end_date=st.date_input("End Date",value=prev.get("end_date",date.today()))
+            end_date=st.date_input("End Date",value=prev.get("end_date",date.today()),min_value=start_date)
+            if end_date<=start_date:
+                st.error("End date must be after start date.")
         budget_type=st.radio("Budget Type",["Total campaign budget","Monthly budget"],horizontal=True,index=0 if prev.get("budget_type","Total")=="Total" else 1)
 
         # ── Section 2: Target Audience ────────────────────────────────────────
@@ -1163,11 +1167,14 @@ if nav=="📊  New Campaign Plan":
                     cc1,cc2,cc3,cc4=st.columns(4)
                     with cc1:
                         aud_val=channel_audience_sizes.get(ch,0)
-                        channel_audience_sizes[ch]=st.number_input(
+                        aud_input=st.number_input(
                             f"Targetable Audience",min_value=0,value=int(aud_val),
                             step=1000,format="%d",key=f"aud_{ch}",
                             help="Get this from Meta Audience Insights / Google Reach Planner / TikTok Audience Estimator"
                         )
+                        channel_audience_sizes[ch]=aud_input
+                        if aud_input>0:
+                            st.caption(f"{aud_input:,.0f} people")
                     with cc2:
                         prev_kpi=channel_kpis_form.get(ch,"CPM (Awareness/Reach)")
                         kpi_idx=KPI_OPTIONS.index(prev_kpi) if prev_kpi in KPI_OPTIONS else 0
