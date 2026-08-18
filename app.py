@@ -181,6 +181,31 @@ def load_saved_plans(sb):
     try: return sb.table("campaign_plans").select("*").order("created_at", desc=True).limit(50).execute().data or []
     except: return []
 
+def get_client_benchmarks(sb, client_id):
+    try: return sb.table("client_benchmarks").select("*").eq("client_id", str(client_id)).execute().data or []
+    except: return []
+
+def save_client_benchmark(sb, client_id, platform, data):
+    try:
+        existing = sb.table("client_benchmarks").select("id").eq("client_id", str(client_id)).eq("platform", platform).execute().data
+        payload = {"client_id": str(client_id), "platform": platform, **data, "updated_at": datetime.utcnow().isoformat()}
+        if existing: sb.table("client_benchmarks").update(payload).eq("client_id", str(client_id)).eq("platform", platform).execute()
+        else: sb.table("client_benchmarks").insert(payload).execute()
+        return True
+    except Exception as e: st.error(f"Error saving benchmark: {e}"); return False
+
+def get_client_benchmarks_as_dict(sb, client_id):
+    """Returns benchmarks as {platform: {cpm, cpc, cpv, cpa, ctr, roas}} for use in planning."""
+    rows = get_client_benchmarks(sb, client_id)
+    result = {}
+    for r in rows:
+        result[r["platform"]] = {
+            "cpm": r.get("cpm"), "cpc": r.get("cpc"), "cpv": r.get("cpv"),
+            "cpa": r.get("cpa"), "ctr": r.get("ctr"), "roas": r.get("roas"),
+            "rows": r.get("sample_size", 0), "is_manual": True
+        }
+    return result
+
 def get_plan_version(sb, campaign_name, brand_id):
     try:
         plans = sb.table("campaign_plans").select("plan_version").eq("campaign_name", campaign_name).eq("brand_id", str(brand_id)).execute().data or []
@@ -971,7 +996,7 @@ if nav=="📊  New Campaign Plan":
             st.markdown("---")
             st.markdown('<div class="green-btn">',unsafe_allow_html=True)
             if st.button("Continue to Historical Data →",use_container_width=True):
-                st.session_state.update({"step":2,"chat_messages":[],"generated_plan":None,"budget_split":{},"channel_kpi_data":{}})
+                st.session_state.update({"step":2,"chat_messages":[],"generated_plan":None,"budget_split":{},"channel_kpi_data":{},"brief_form":{},"brief_summary":{}})
                 st.rerun()
             st.markdown('</div>',unsafe_allow_html=True)
 
@@ -1095,9 +1120,18 @@ if nav=="📊  New Campaign Plan":
 
         ALL_CHANNELS=["Facebook","Instagram","YouTube","Google Search","Google Display","TikTok","LinkedIn","Programmatic Display"]
         OBJECTIVES=["Brand Awareness","Reach & Frequency","Video Views","Website Traffic","Lead Generation","E-commerce / Conversions","App Installs","Engagement"]
-        ASSET_TYPES=["Static Images","Video — 6s","Video — 15s","Video — 30s","Video — 60s","Carousel","Stories / Reels","UGC Content","Influencer Content"]
+        # Asset types vary by channel — video platforms can't run static images
+        ALL_ASSET_TYPES=["Static Images","Video — 6s","Video — 15s","Video — 30s","Video — 60s","Carousel","Stories / Reels","UGC Content","Influencer Content"]
+        VIDEO_ONLY_CHANNELS=["youtube","tiktok"]  # no static images on these platforms
+        def get_asset_types(ch):
+            if any(v in ch.lower() for v in VIDEO_ONLY_CHANNELS):
+                return [a for a in ALL_ASSET_TYPES if a!="Static Images"]
+            return ALL_ASSET_TYPES
+        ASSET_TYPES=ALL_ASSET_TYPES  # keep for reference
 
-        prev=st.session_state.get("brief_form",{})
+        # Only restore previous form if same brand/client — clear if new session
+        prev_brand=st.session_state.get("brief_form",{}).get("brand_name","")
+        prev=st.session_state.get("brief_form",{}) if prev_brand==brand_name else {}
 
         # ── Section 1: Campaign Basics ────────────────────────────────────────
         st.markdown('<div class="section-header">1 · Campaign Basics</div>',unsafe_allow_html=True)
@@ -1196,20 +1230,24 @@ if nav=="📊  New Campaign Plan":
             split_by_asset=st.checkbox("Split budget by creative asset type",value=prev.get("split_by_asset",False))
 
             for ch in selected_channels:
+                ch_asset_types=get_asset_types(ch)
                 st.markdown(f"**{ch}**")
-                cols=st.columns(len(ASSET_TYPES))
+                if any(v in ch.lower() for v in VIDEO_ONLY_CHANNELS):
+                    st.caption("ℹ️ Static Images not available on this platform")
+                cols=st.columns(len(ch_asset_types))
                 selected_assets=[]
-                for i,asset in enumerate(ASSET_TYPES):
+                for i,asset in enumerate(ch_asset_types):
                     if cols[i].checkbox(asset.replace(" — "," "),value=asset in prev_assets.get(ch,[]),key=f"asset_{ch}_{i}",label_visibility="visible"):
                         selected_assets.append(asset)
                 creative_assets[ch]=selected_assets
 
                 if split_by_asset and selected_assets:
                     st.caption(f"Budget split for {ch} (LKR) — must add up to channel total:")
-                    ab_cols=st.columns(len(selected_assets))
+                    ab_cols=st.columns(min(len(selected_assets),4))
                     ch_budgets={}
                     for i,asset in enumerate(selected_assets):
-                        ch_budgets[asset]=ab_cols[i].number_input(
+                        col_idx=i%4
+                        ch_budgets[asset]=ab_cols[col_idx].number_input(
                             asset,min_value=0,value=int(prev_asset_budgets.get(ch,{}).get(asset,0)),
                             step=10000,format="%d",key=f"ab_{ch}_{i}",label_visibility="visible"
                         )
@@ -1277,6 +1315,14 @@ if nav=="📊  New Campaign Plan":
                     with st.spinner("🤖 Optimising budget split and generating your media plan…"):
                         try:
                             data_summary=summarise_dataframe(st.session_state["combined_df"])
+                            # Merge benchmarks: client manual > uploaded data > industry average
+                            client_id=st.session_state["selected_client"]["id"]
+                            client_bm=get_client_benchmarks_as_dict(sb,client_id)
+                            merged_benchmarks={**benchmarks}
+                            for plat,bm_data in client_bm.items():
+                                if any(bm_data.get(m) for m in ["cpm","cpc","cpv","cpa"]):
+                                    merged_benchmarks[plat]={**merged_benchmarks.get(plat,{}),**bm_data}
+                            benchmarks=merged_benchmarks
                             # Extract clean KPI type strings
                             ch_kpi_types={ch:v.split(" ")[0] for ch,v in channel_kpis_form.items() if ch in selected_channels}
                             budget_split=calculate_budget_split(
@@ -1412,9 +1458,10 @@ if nav=="📊  New Campaign Plan":
         with cc:
             st.markdown('<div class="green-btn">',unsafe_allow_html=True)
             if st.button("➕ New Plan",use_container_width=True):
-                for k in ["step","brief","selected_client","selected_brand","combined_df","loaded_benchmarks",
-                          "generated_plan","chat_messages","brief_summary","auto_saved_version",
-                          "budget_split","channel_kpi_data","edit_mode","edit_plan","edit_messages"]:
+                for k in ["step","brief","brief_form","selected_client","selected_brand","combined_df",
+                          "loaded_benchmarks","generated_plan","chat_messages","brief_summary",
+                          "auto_saved_version","budget_split","channel_kpi_data","budget_ranking",
+                          "edit_mode","edit_plan","edit_messages"]:
                     st.session_state[k] = 1 if k=="step" else ([] if k in ["chat_messages","edit_messages"] else None)
                 st.rerun()
             st.markdown('</div>',unsafe_allow_html=True)
@@ -1658,6 +1705,61 @@ elif nav=="⚙️  Settings":
             if st.button(f"Save {pname}",key=f"save_{pname}"):
                 save_platform_setting(sb,pname,{"freq_cap_awareness":fa,"freq_cap_conversion":fc,"reach_curve_inflection":ri,"notes":notes})
                 st.success(f"✅ {pname} settings saved!")
+
+    # ── Client Historical Benchmarks ─────────────────────────────────────────
+    st.markdown('<div class="section-header">Client Historical Benchmarks</div>',unsafe_allow_html=True)
+    st.caption("Enter historical buying rates per client. These take priority over uploaded data and industry averages when planning for that client.")
+
+    clients_list=get_clients_list(sb)
+    if not clients_list:
+        st.info("No clients found. Create a client first in New Campaign Plan.")
+    else:
+        client_names_list=[c["client_name"] for c in clients_list]
+        sel_client_name=st.selectbox("Select Client",client_names_list,key="settings_client")
+        sel_client=next((c for c in clients_list if c["client_name"]==sel_client_name),None)
+
+        if sel_client:
+            existing_benchmarks=get_client_benchmarks_as_dict(sb,sel_client["id"])
+            PLATFORMS=["Facebook","Instagram","YouTube","Google Search","Google Display","TikTok","LinkedIn","Programmatic Display"]
+            METRICS=["cpm","cpc","cpv","cpa","ctr","roas"]
+            METRIC_LABELS={"cpm":"CPM (LKR)","cpc":"CPC (LKR)","cpv":"CPV (LKR)","cpa":"CPA (LKR)","ctr":"CTR (%)","roas":"ROAS"}
+
+            st.markdown(f"**Benchmarks for {sel_client_name}**")
+            st.caption("Leave at 0 to use uploaded data or industry averages. Values entered here will be used for all plans for this client.")
+
+            for platform in PLATFORMS:
+                existing=existing_benchmarks.get(platform,{})
+                industry=INDUSTRY_AVERAGES.get(platform,{})
+                with st.expander(f"📊 {platform}" + (" ✅ Custom data saved" if existing.get("cpm") or existing.get("cpc") else " — using defaults")):
+                    # Show current values vs industry averages
+                    st.markdown("<div style='font-size:0.8rem;color:#8a93a8;margin-bottom:8px;'>Industry average shown as placeholder. Enter your client's actual rates.</div>",unsafe_allow_html=True)
+                    cols=st.columns(3)
+                    vals={}
+                    for i,metric in enumerate(METRICS):
+                        col=cols[i%3]
+                        ia_val=industry.get(metric,0) or 0
+                        saved_val=existing.get(metric) or 0
+                        display_val=float(saved_val) if saved_val else 0.0
+                        vals[metric]=col.number_input(
+                            METRIC_LABELS[metric],
+                            min_value=0.0,value=display_val,
+                            step=1.0 if metric not in ["ctr","roas"] else 0.01,
+                            format="%.2f" if metric in ["ctr","roas","cpv"] else "%.0f",
+                            key=f"bm_{sel_client['id']}_{platform}_{metric}",
+                            help=f"Industry avg: {ia_val}"
+                        )
+                    sample_size=st.number_input("Sample size (number of campaigns this is based on)",
+                        min_value=0,value=int(existing.get("sample_size",0) or 0),
+                        key=f"bm_ss_{sel_client['id']}_{platform}")
+                    if st.button(f"💾 Save {platform}",key=f"save_bm_{sel_client['id']}_{platform}"):
+                        save_client_benchmark(sb,sel_client["id"],platform,{
+                            "cpm":vals["cpm"] or None,"cpc":vals["cpc"] or None,
+                            "cpv":vals["cpv"] or None,"cpa":vals["cpa"] or None,
+                            "ctr":vals["ctr"] or None,"roas":vals["roas"] or None,
+                            "sample_size":sample_size
+                        })
+                        st.success(f"✅ {platform} benchmarks saved for {sel_client_name}!")
+                        st.rerun()
 
     st.markdown('<div class="section-header">Sri Lanka Industry Averages (Fallback)</div>',unsafe_allow_html=True)
     st.caption("These are used when no historical data exists for a channel. Clearly marked in plan outputs.")
