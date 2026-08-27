@@ -12,6 +12,13 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# Health check for Render uptime monitoring
+import urllib.parse as _urlparse
+_qp = st.query_params
+if _qp.get("healthz") == "1":
+    st.write("OK")
+    st.stop()
+
 st.set_page_config(page_title="Orchestration-Digital", page_icon="🎯", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
