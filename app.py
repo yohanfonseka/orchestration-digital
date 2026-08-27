@@ -1,5 +1,6 @@
 # Orchestration-Digital v1.3 build=1787840016
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import json
@@ -956,7 +957,7 @@ st.markdown("""
 if nav=="📊  New Campaign Plan":
     sb=get_supabase()
     # Scroll to top whenever this page loads
-    st.markdown("<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>",unsafe_allow_html=True)
+    components.html("<script>window.parent.document.querySelector('section.main').scrollTop=0;</script>",height=0)
     # If arriving at this tab while on step 4 (showing old plan) — reset to step 1
     prev_nav=st.session_state.get("prev_nav","")
     if prev_nav != "📊  New Campaign Plan" and st.session_state.get("step",1)==4:
@@ -1127,7 +1128,7 @@ if nav=="📊  New Campaign Plan":
         benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
 
         # Scroll to top when brief form loads
-        st.markdown("<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>",unsafe_allow_html=True)
+        components.html("<script>window.parent.document.querySelector('section.main').scrollTop=0;</script>",height=0)
         st.markdown(f'<div class="section-header">Campaign Brief — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
 
         ALL_CHANNELS=["Facebook","Instagram","YouTube","Google Search","Google Display","TikTok","LinkedIn","Programmatic Display"]
@@ -1157,14 +1158,24 @@ if nav=="📊  New Campaign Plan":
 
         col4,col5,col6=st.columns(3)
         with col4:
-            total_budget=st.number_input("Total Budget (LKR)",min_value=0,value=int(prev.get("total_budget",0)),step=50000,format="%d")
+            budget_key="brief_budget_input"
+            if budget_key not in st.session_state:
+                st.session_state[budget_key]=int(prev.get("total_budget",0))
+            total_budget=st.number_input(
+                "Total Budget (LKR)",min_value=0,
+                value=st.session_state[budget_key],
+                step=50000,format="%d",key=budget_key)
             if total_budget>0:
                 st.caption(f"💰 LKR {total_budget:,.0f}  ≈  USD {total_budget/320:,.0f}")
         with col5:
-            start_date=st.date_input("Start Date",value=prev.get("start_date",date.today()),min_value=date.today())
+            start_date=st.date_input("Start Date",
+                value=prev.get("start_date",date.today()),
+                format="DD/MM/YYYY")
         with col6:
-            end_date=st.date_input("End Date",value=prev.get("end_date",date.today()))
-            if end_date<=start_date:
+            end_date=st.date_input("End Date",
+                value=prev.get("end_date",date.today()),
+                format="DD/MM/YYYY")
+            if end_date and start_date and end_date<=start_date:
                 st.error("⚠️ End date must be after start date.")
         budget_type=st.radio("Budget Type",["Total campaign budget","Monthly budget"],horizontal=True,index=0 if prev.get("budget_type","Total")=="Total" else 1)
 
@@ -1398,7 +1409,7 @@ if nav=="📊  New Campaign Plan":
 
     # STEP 4
     elif st.session_state["step"]==4:
-        st.markdown("<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>",unsafe_allow_html=True)
+        components.html("<script>window.parent.document.querySelector('section.main').scrollTop=0;</script>",height=0)
         client_name=st.session_state["selected_client"]["client_name"]
         brand_name=st.session_state["selected_brand"]["brand_name"]
         plan_text=st.session_state["generated_plan"]
@@ -1479,7 +1490,7 @@ if nav=="📊  New Campaign Plan":
                 for k in ["step","brief","brief_form","selected_client","selected_brand","combined_df",
                           "loaded_benchmarks","generated_plan","chat_messages","brief_summary",
                           "auto_saved_version","budget_split","channel_kpi_data","budget_ranking",
-                          "edit_mode","edit_plan","edit_messages"]:
+                          "edit_mode","edit_plan","edit_messages","brief_budget_input"]:
                     st.session_state[k] = 1 if k=="step" else ([] if k in ["chat_messages","edit_messages"] else None)
                 st.rerun()
             st.markdown('</div>',unsafe_allow_html=True)
