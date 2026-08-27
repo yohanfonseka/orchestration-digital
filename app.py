@@ -132,11 +132,23 @@ AUTO_SCROLL_JS = """
 """
 
 @st.cache_resource
+def _get_secret(key):
+    """Read from Streamlit secrets (Cloud) or environment variables (Render)."""
+    import os
+    try:
+        return st.secrets[key]
+    except Exception:
+        val = os.environ.get(key)
+        if not val:
+            st.error(f"Missing secret: {key}. Add it to Streamlit secrets or Render environment variables.")
+            st.stop()
+        return val
+
 def get_supabase():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    return create_client(_get_secret("SUPABASE_URL"), _get_secret("SUPABASE_KEY"))
 
 def get_anthropic_client():
-    return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+    return anthropic.Anthropic(api_key=_get_secret("ANTHROPIC_API_KEY"))
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 def get_clients_list(sb):
