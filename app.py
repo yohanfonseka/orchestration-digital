@@ -954,6 +954,17 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════════════════
 if nav=="📊  New Campaign Plan":
     sb=get_supabase()
+    # Scroll to top whenever this page loads
+    st.markdown("<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>",unsafe_allow_html=True)
+    # If arriving at this tab while on step 4 (showing old plan) — reset to step 1
+    prev_nav=st.session_state.get("prev_nav","")
+    if prev_nav != "📊  New Campaign Plan" and st.session_state.get("step",1)==4:
+        for k in ["step","brief","brief_form","selected_client","selected_brand","combined_df",
+                  "loaded_benchmarks","generated_plan","chat_messages","brief_summary",
+                  "auto_saved_version","budget_split","channel_kpi_data","budget_ranking",
+                  "edit_mode","edit_plan","edit_messages"]:
+            st.session_state[k] = 1 if k=="step" else ([] if k in ["chat_messages","edit_messages"] else None)
+    st.session_state["prev_nav"]="📊  New Campaign Plan"
     steps=["1 · Client & Brand","2 · Historical Data","3 · Campaign Brief","4 · Media Plan"]
     cols=st.columns(4)
     for i,(col,label) in enumerate(zip(cols,steps),1):
@@ -1114,8 +1125,8 @@ if nav=="📊  New Campaign Plan":
         brand_name=st.session_state["selected_brand"]["brand_name"]
         benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
 
-        # Scroll to top of page when step loads
-        st.markdown("<script>window.scrollTo(0,0);</script>", unsafe_allow_html=True)
+        # Scroll to top when brief form loads
+        st.markdown("<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>",unsafe_allow_html=True)
         st.markdown(f'<div class="section-header">Campaign Brief — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
 
         ALL_CHANNELS=["Facebook","Instagram","YouTube","Google Search","Google Display","TikTok","LinkedIn","Programmatic Display"]
@@ -1145,14 +1156,15 @@ if nav=="📊  New Campaign Plan":
 
         col4,col5,col6=st.columns(3)
         with col4:
-            total_budget=st.number_input("Total Budget (LKR)",min_value=0,value=int(prev.get("total_budget",1000000)),step=50000,format="%d")
-            st.caption(f"💰 LKR {total_budget:,.0f}  ≈  USD {total_budget/320:,.0f}")
+            total_budget=st.number_input("Total Budget (LKR)",min_value=0,value=int(prev.get("total_budget",0)),step=50000,format="%d")
+            if total_budget>0:
+                st.caption(f"💰 LKR {total_budget:,.0f}  ≈  USD {total_budget/320:,.0f}")
         with col5:
-            start_date=st.date_input("Start Date",value=prev.get("start_date",date.today()))
+            start_date=st.date_input("Start Date",value=prev.get("start_date",date.today()),min_value=date.today())
         with col6:
-            end_date=st.date_input("End Date",value=prev.get("end_date",date.today()),min_value=start_date)
+            end_date=st.date_input("End Date",value=prev.get("end_date",date.today()))
             if end_date<=start_date:
-                st.error("End date must be after start date.")
+                st.error("⚠️ End date must be after start date.")
         budget_type=st.radio("Budget Type",["Total campaign budget","Monthly budget"],horizontal=True,index=0 if prev.get("budget_type","Total")=="Total" else 1)
 
         # ── Section 2: Target Audience ────────────────────────────────────────
@@ -1247,10 +1259,14 @@ if nav=="📊  New Campaign Plan":
                     ch_budgets={}
                     for i,asset in enumerate(selected_assets):
                         col_idx=i%4
-                        ch_budgets[asset]=ab_cols[col_idx].number_input(
-                            asset,min_value=0,value=int(prev_asset_budgets.get(ch,{}).get(asset,0)),
+                        ab_val=int(prev_asset_budgets.get(ch,{}).get(asset,0))
+                        ab_input=ab_cols[col_idx].number_input(
+                            asset,min_value=0,value=ab_val,
                             step=10000,format="%d",key=f"ab_{ch}_{i}",label_visibility="visible"
                         )
+                        if ab_input>0:
+                            ab_cols[col_idx].caption(f"LKR {ab_input:,.0f}")
+                        ch_budgets[asset]=ab_input
                     asset_budgets[ch]=ch_budgets
                 st.markdown("<div style='height:4px'></div>",unsafe_allow_html=True)
 
@@ -1381,6 +1397,7 @@ if nav=="📊  New Campaign Plan":
 
     # STEP 4
     elif st.session_state["step"]==4:
+        st.markdown("<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>",unsafe_allow_html=True)
         client_name=st.session_state["selected_client"]["client_name"]
         brand_name=st.session_state["selected_brand"]["brand_name"]
         plan_text=st.session_state["generated_plan"]
@@ -1493,6 +1510,7 @@ if nav=="📊  New Campaign Plan":
 # SAVED PLANS
 # ══════════════════════════════════════════════════════════════════════════════
 elif nav=="📁  Saved Plans":
+    st.session_state["prev_nav"]="📁  Saved Plans"
     sb=get_supabase()
 
     # Edit mode
