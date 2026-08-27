@@ -976,7 +976,7 @@ st.markdown("""
 if nav=="📊  New Campaign Plan":
     sb=get_supabase()
     # Scroll to top whenever this page loads
-    components.html("<script>window.parent.document.querySelector('section.main').scrollTop=0;</script>",height=0)
+    
     # If arriving at this tab while on step 4 (showing old plan) — reset to step 1
     prev_nav=st.session_state.get("prev_nav","")
     if prev_nav != "📊  New Campaign Plan" and st.session_state.get("step",1)==4:
@@ -1147,7 +1147,7 @@ if nav=="📊  New Campaign Plan":
         benchmarks=st.session_state.get("loaded_benchmarks") or extract_channel_benchmarks(st.session_state["combined_df"])
 
         # Scroll to top when brief form loads
-        components.html("<script>window.parent.document.querySelector('section.main').scrollTop=0;</script>",height=0)
+        
         st.markdown(f'<div class="section-header">Campaign Brief — {client_name} · {brand_name}</div>',unsafe_allow_html=True)
 
         ALL_CHANNELS=["Facebook","Instagram","YouTube","Google Search","Google Display","TikTok","LinkedIn","Programmatic Display"]
@@ -1185,16 +1185,35 @@ if nav=="📊  New Campaign Plan":
                 value=st.session_state[budget_key],
                 step=50000,format="%d",key=budget_key)
             if total_budget>0:
-                st.caption(f"💰 LKR {total_budget:,.0f}  ≈  USD {total_budget/320:,.0f}")
+                st.markdown(f"<div style='color:#1a8a6e;font-size:0.85rem;font-weight:600;margin-top:-8px;'>💰 LKR {total_budget:,.0f} &nbsp;≈&nbsp; USD {int(total_budget/320):,}</div>",unsafe_allow_html=True)
         with col5:
-            start_date=st.date_input("Start Date",
-                value=prev.get("start_date",date.today()),
-                format="DD/MM/YYYY")
+            st.markdown("**Start Date**")
+            sd_prev = prev.get("start_date", date.today())
+            if isinstance(sd_prev, str):
+                try: sd_prev = date.fromisoformat(sd_prev)
+                except: sd_prev = date.today()
+            sc1,sc2,sc3 = st.columns(3)
+            sd_day   = sc1.selectbox("Day",  list(range(1,32)),  index=sd_prev.day-1,   key="sd_day",  label_visibility="collapsed")
+            sd_month = sc2.selectbox("Month", list(range(1,13)),  index=sd_prev.month-1, key="sd_month",label_visibility="collapsed")
+            sd_year  = sc3.selectbox("Year",  list(range(2024,2030)), index=list(range(2024,2030)).index(sd_prev.year) if sd_prev.year in range(2024,2030) else 2, key="sd_year", label_visibility="collapsed")
+            try: start_date = date(sd_year, sd_month, sd_day)
+            except: start_date = date.today()
+            st.caption(f"📅 {start_date.strftime('%d %b %Y')}")
+
         with col6:
-            end_date=st.date_input("End Date",
-                value=prev.get("end_date",date.today()),
-                format="DD/MM/YYYY")
-            if end_date and start_date and end_date<=start_date:
+            st.markdown("**End Date**")
+            ed_prev = prev.get("end_date", date.today())
+            if isinstance(ed_prev, str):
+                try: ed_prev = date.fromisoformat(ed_prev)
+                except: ed_prev = date.today()
+            ec1,ec2,ec3 = st.columns(3)
+            ed_day   = ec1.selectbox("Day",  list(range(1,32)),  index=ed_prev.day-1,   key="ed_day",  label_visibility="collapsed")
+            ed_month = ec2.selectbox("Month", list(range(1,13)),  index=ed_prev.month-1, key="ed_month",label_visibility="collapsed")
+            ed_year  = ec3.selectbox("Year",  list(range(2024,2030)), index=list(range(2024,2030)).index(ed_prev.year) if ed_prev.year in range(2024,2030) else 2, key="ed_year", label_visibility="collapsed")
+            try: end_date = date(ed_year, ed_month, ed_day)
+            except: end_date = date.today()
+            st.caption(f"📅 {end_date.strftime('%d %b %Y')}")
+            if end_date <= start_date:
                 st.error("⚠️ End date must be after start date.")
         budget_type=st.radio("Budget Type",["Total campaign budget","Monthly budget"],horizontal=True,index=0 if prev.get("budget_type","Total")=="Total" else 1)
 
@@ -1428,7 +1447,7 @@ if nav=="📊  New Campaign Plan":
 
     # STEP 4
     elif st.session_state["step"]==4:
-        components.html("<script>window.parent.document.querySelector('section.main').scrollTop=0;</script>",height=0)
+        
         client_name=st.session_state["selected_client"]["client_name"]
         brand_name=st.session_state["selected_brand"]["brand_name"]
         plan_text=st.session_state["generated_plan"]
